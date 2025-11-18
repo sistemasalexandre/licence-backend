@@ -15,7 +15,7 @@
     "express": "^4.18.2",
     "pg": "^8.11.0",
     "@sendgrid/mail": "^8.1.6",
-    "stripe": "^12.19.0",
+    "stripe": "^19.3.1",
     "zod": "^3.22.2"
   },
   "devDependencies": {
