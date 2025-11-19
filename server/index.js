@@ -30,9 +30,85 @@ app.use(cors({
   credentials: true
 }));
 
-// keep raw body for webhook verification
+// NOTE: We register the webhook route *before* body parsers so the webhook
+// endpoint can receive the raw body required by Stripe signature verification.
+// The other routes (JSON endpoints) will be registered after express.json().
+//
+// Health route is safe to keep before body parsers.
+app.get('/', (req, res) => res.send('License backend running'));
+
+// ----------------- Stripe webhook endpoint (must receive raw body) -----------------
+// If you use webhooks, ensure STRIPE_WEBHOOK_SECRET is set in your envs.
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!STRIPE_WEBHOOK_SECRET || !stripe) {
+    console.log('[WEBHOOK] Stripe webhook not configured (missing secret or stripe client).');
+    return res.status(501).send('Webhook not configured');
+  }
+
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    // req.body is a Buffer because we used express.raw for this route
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('[WEBHOOK] Signature verification failed:', err && err.message ? err.message : err);
+    return res.status(400).send(`Webhook Error: ${err && err.message ? err.message : 'invalid signature'}`);
+  }
+
+  console.log('[WEBHOOK] Received event:', event.type);
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const customerEmail = session.customer_email || null;
+
+    // generate a simple license key (replace with your production logic)
+    const licenseKey = 'LIC-' + Math.random().toString(36).slice(2, 10).toUpperCase();
+    console.log('[WEBHOOK] Creating license for session:', session.id, 'license:', licenseKey);
+
+    if (SUPABASE_URL && SUPABASE_SERVICE_ROLE) {
+      try {
+        // Node 18+ has fetch globally; if your Node version doesn't, install node-fetch
+        const resp = await fetch(`${SUPABASE_URL}/rest/v1/licenses`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_SERVICE_ROLE,
+            'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+          },
+          body: JSON.stringify({
+            license_key: licenseKey,
+            used: false,
+            created_at: new Date().toISOString()
+          })
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text();
+          console.error('[WEBHOOK] Supabase insert failed:', resp.status, text);
+        } else {
+          const data = await resp.json();
+          console.log('[WEBHOOK] License saved to Supabase:', data);
+        }
+      } catch (err) {
+        console.error('[WEBHOOK] Error saving to Supabase:', err);
+      }
+    } else {
+      console.log('[WEBHOOK] SUPABASE_URL or SUPABASE_SERVICE_ROLE not set — skipping DB save.');
+    }
+
+    // Optionally: send email to customerEmail here (SendGrid/nodemailer).
+  }
+
+  // Respond to Stripe
+  res.json({ received: true });
+});
+
+// ----------------- Body parsers for JSON endpoints (after webhook) -----------------
+// keep raw body on other routes if needed via verify
 app.use(express.json({
   verify: function (req, res, buf) {
+    // attach rawBody string for debugging or other uses (not used by webhook)
     req.rawBody = buf && buf.length ? buf.toString() : '';
   }
 }));
@@ -47,9 +123,6 @@ console.log('ENV CHECK → FRONTEND_URL?', FRONTEND_URL);
 console.log('ENV CHECK → ALLOWED_ORIGIN?', ALLOWED_ORIGIN);
 
 // ----------------- Routes -----------------
-
-// Health
-app.get('/', (req, res) => res.send('License backend running'));
 
 // Create Checkout Session
 app.post('/api/create-checkout-session', async (req, res) => {
@@ -97,71 +170,6 @@ app.post('/api/create-checkout-session', async (req, res) => {
     console.error('[create-checkout-session ERROR]', err && err.stack ? err.stack : err);
     return res.status(500).json({ ok: false, error: err && err.message ? err.message : 'internal error' });
   }
-});
-
-// Stripe webhook endpoint (optional)
-// If you use webhooks, ensure STRIPE_WEBHOOK_SECRET is set in Render envs.
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  if (!STRIPE_WEBHOOK_SECRET || !stripe) {
-    console.log('[WEBHOOK] Stripe webhook not configured.');
-    return res.status(501).send('Webhook not configured');
-  }
-
-  const sig = req.headers['stripe-signature'];
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('[WEBHOOK] Signature verification failed:', err && err.message ? err.message : err);
-    return res.status(400).send(`Webhook Error: ${err && err.message ? err.message : 'invalid signature'}`);
-  }
-
-  console.log('[WEBHOOK] Received event:', event.type);
-
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const customerEmail = session.customer_email || null;
-
-    // generate a simple license key (replace with your logic)
-    const licenseKey = 'LIC-' + Math.random().toString(36).slice(2, 10).toUpperCase();
-    console.log('[WEBHOOK] Creating license for session:', session.id, 'license:', licenseKey);
-
-    if (SUPABASE_URL && SUPABASE_SERVICE_ROLE) {
-      try {
-        // Node 18+ has fetch globally; if not, install node-fetch.
-        const resp = await fetch(`${SUPABASE_URL}/rest/v1/licenses`, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_SERVICE_ROLE,
-            'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation'
-          },
-          body: JSON.stringify({
-            license_key: licenseKey,
-            used: false,
-            created_at: new Date().toISOString()
-          })
-        });
-
-        if (!resp.ok) {
-          const text = await resp.text();
-          console.error('[WEBHOOK] Supabase insert failed:', resp.status, text);
-        } else {
-          const data = await resp.json();
-          console.log('[WEBHOOK] License saved to Supabase:', data);
-        }
-      } catch (err) {
-        console.error('[WEBHOOK] Error saving to Supabase:', err);
-      }
-    } else {
-      console.log('[WEBHOOK] SUPABASE_URL or SUPABASE_SERVICE_ROLE not set — skipping DB save.');
-    }
-
-    // Optionally: send email to customerEmail here (SendGrid/nodemailer).
-  }
-
-  res.json({ received: true });
 });
 
 // 404
