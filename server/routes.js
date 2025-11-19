@@ -24,8 +24,8 @@ async function sendLicenseEmail(toEmail, licenseKey) {
     to: toEmail,
     from: process.env.EMAIL_FROM || 'no-reply@vidacomgrana.com.br', // must be verified sender in SendGrid
     subject: 'Sua licença VidaComGrana',
-    text: `Obrigado pela compra! Sua licença: ${licenseKey}\nUse-a ao criar seu login: ${process.env.ALLOWED_ORIGIN}`,
-    html: `<p>Obrigado pela compra!</p><p>Sua licença: <b>${licenseKey}</b></p><p>Use-a ao criar seu login: <a href="${process.env.ALLOWED_ORIGIN}">${process.env.ALLOWED_ORIGIN}</a></p>`
+    text: `Obrigado pela compra! Sua licença: ${licenseKey}\nUse-a ao criar seu login: ${process.env.ALLOWED_ORIGIN || ''}`,
+    html: `<p>Obrigado pela compra!</p><p>Sua licença: <b>${licenseKey}</b></p><p>Use-a ao criar seu login: <a href="${process.env.ALLOWED_ORIGIN || '#'}">${process.env.ALLOWED_ORIGIN || ''}</a></p>`
   };
   try {
     await sgMail.send(msg);
@@ -40,9 +40,9 @@ router.post('/test-create-license', async (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'email obrigatório' });
   try {
-    const licenseKey = crypto.randomBytes(16).toString('hex');
+    const licenseKey = crypto.randomBytes(16).toString('hex'); // 32 hex chars
     await pool.query(
-      'INSERT INTO pending_licenses (license_key, email) VALUES ($1, $2)',
+      'INSERT INTO pending_licenses (license_key, email, used, created_at) VALUES ($1, $2, false, now())',
       [licenseKey, email]
     );
     // optionally send email
@@ -59,7 +59,8 @@ router.post('/register', async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
     password: z.string().min(6),
-    licenseKey: z.string().min(32)
+    // license keys may vary in format (hex 32 chars, or prefixed like LIC-...), keep mínima restrição
+    licenseKey: z.string().min(8)
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.errors });
@@ -74,21 +75,24 @@ router.post('/register', async (req, res) => {
     if (!licRes.rows.length) return res.status(400).json({ error: 'Licença inválida' });
     const lic = licRes.rows[0];
     if (lic.used) return res.status(400).json({ error: 'Licença já usada' });
-    if (lic.email.toLowerCase() !== email.toLowerCase()) {
+
+    // compare emails case-insensitive if stored
+    const licEmail = lic.email ? lic.email.toLowerCase() : null;
+    if (licEmail && licEmail !== email.toLowerCase()) {
       return res.status(400).json({ error: 'Licença não pertence a este email' });
     }
 
     // create user (fail if email exists)
     const hashed = await bcrypt.hash(password, SALT_ROUNDS);
     const userInsert = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id',
+      'INSERT INTO users (email, password_hash, created_at) VALUES ($1, $2, now()) RETURNING id',
       [email, hashed]
     );
     const userId = userInsert.rows[0].id;
 
     // mark license used and associate to user
-    await pool.query('UPDATE pending_licenses SET used = true WHERE license_key = $1', [licenseKey]);
-    await pool.query('INSERT INTO user_licenses (user_id, license_key) VALUES ($1, $2)', [userId, licenseKey]);
+    await pool.query('UPDATE pending_licenses SET used = true, used_at = now() WHERE license_key = $1', [licenseKey]);
+    await pool.query('INSERT INTO user_licenses (user_id, license_key, activated_at) VALUES ($1, $2, now())', [userId, licenseKey]);
 
     return res.json({ ok: true, message: 'Conta criada e licença ativada' });
   } catch (err) {
@@ -134,7 +138,7 @@ router.post('/login', async (req, res) => {
 router.post('/validate-license', async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
-    licenseKey: z.string().min(32)
+    licenseKey: z.string().min(8)
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.errors });
@@ -161,48 +165,6 @@ router.post('/validate-license', async (req, res) => {
   }
 });
 
-// ========== Stripe webhook endpoint ==========
-router.post('/stripe-webhook', async (req, res) => {
-  // expects raw body in index.js (req.rawBody)
-  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
-  const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!endpointSecret) {
-    console.error('STRIPE_WEBHOOK_SECRET não configurado');
-    return res.status(500).send('Stripe webhook secret not configured');
-  }
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(Buffer.from(req.rawBody || ''), sig, endpointSecret);
-  } catch (err) {
-    console.error('Webhook signature verification failed.', err.message || err);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // handle checkout.session.completed
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const email = session.metadata?.email || session.customer_details?.email;
-    if (!email) {
-      console.error('Stripe session missing email');
-    } else {
-      try {
-        const licenseKey = crypto.randomBytes(16).toString('hex');
-        await pool.query(
-          'INSERT INTO pending_licenses (license_key, email, used) VALUES ($1, $2, false)',
-          [licenseKey, email]
-        );
-        console.log('Pending license created for', email, licenseKey);
-        // send license to buyer by email
-        await sendLicenseEmail(email, licenseKey);
-      } catch (err) {
-        console.error('Error creating pending license from webhook', err);
-      }
-    }
-  }
-
-  res.json({ received: true });
-});
-
+// NOTE: Stripe webhook is handled in server/index.js (with express.raw).
+// Export router with all other application routes.
 module.exports = router;
