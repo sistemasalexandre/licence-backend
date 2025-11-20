@@ -1,4 +1,4 @@
-// server/index.js — VERSÃO FINAL 100% CORRIGIDA PARA TABELA "licenses"
+// server/index.js — VERSÃO FINAL CORRIGIDA PARA TABELA "licenses"
 
 const express = require('express');
 const cors = require('cors');
