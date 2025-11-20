@@ -1,151 +1,109 @@
-// server/index.js — VERSÃO FINAL
+// server/index.js
+// Arquivo completo. Cole inteiro no seu projeto.
 
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto');
-const pool = require('./db');
-const { router, sendLicenseEmail } = require('./routes');
+
+const routes = require('./routes'); // nosso arquivo de rotas
 
 const app = express();
 
-// =====================================
-// VARIÁVEIS DE AMBIENTE
-// =====================================
+// ----------------- Variáveis de ambiente -----------------
+const PORT = process.env.PORT || 10000;
+
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://vidacomgrana.pages.dev';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vidacomgrana.pages.dev';
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || null;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || null;
+const SUPABASE_URL = process.env.SUPABASE_URL || null;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || null;
+
+// ----------------- Stripe (opcional) -----------------
 let stripe = null;
 if (STRIPE_SECRET_KEY) {
-  stripe = require('stripe')(STRIPE_SECRET_KEY);
+  try {
+    stripe = require('stripe')(STRIPE_SECRET_KEY);
+    console.log('[INIT] Stripe inicializado.');
+  } catch (err) {
+    console.error('[INIT] Falha ao inicializar Stripe:', err.message);
+    stripe = null;
+  }
+} else {
+  console.warn('[INIT] STRIPE_SECRET_KEY não definida. Rotas de pagamento podem não funcionar.');
 }
 
-// =====================================
-// CORS
-// =====================================
+// Disponibiliza no app (se precisar em routes.js)
+app.locals.stripe = stripe;
+app.locals.STRIPE_WEBHOOK_SECRET = STRIPE_WEBHOOK_SECRET;
+
+// ----------------- Middlewares -----------------
 app.use(cors({
   origin: ALLOWED_ORIGIN,
   credentials: true
 }));
 
-app.get('/', (req, res) => res.send('Backend de licenças rodando ✔'));
-
-
-// =====================================
-// WEBHOOK — Precisa vir ANTES do express.json()
-// =====================================
-app.post('/api/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-
-    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
-      return res.status(501).send('Stripe não configurado');
+// Mantém o corpo bruto apenas para o webhook do Stripe
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl.startsWith('/api/stripe-webhook')) {
+      req.rawBody = buf; // usado para verificar a assinatura do Stripe
     }
-
-    const signature = req.headers['stripe-signature'];
-    let event;
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        signature,
-        STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("Erro webhook:", err.message);
-      return res.status(400).send(`Webhook error: ${err.message}`);
-    }
-
-    console.log("EVENTO:", event.type);
-
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-
-      const customerEmail =
-        session.customer_email ||
-        (session.customer_details && session.customer_details.email) ||
-        null;
-
-      const licenseKey = "LIC-" + crypto.randomBytes(6).toString("hex").toUpperCase();
-
-      console.log("Criando licença para:", customerEmail);
-
-      try {
-        await pool.query(
-          `INSERT INTO licenses (user_id, license_key, used, created_at)
-           VALUES (NULL, $1, false, NOW())`,
-          [licenseKey]
-        );
-
-        console.log("Licença salva no banco:", licenseKey);
-
-        if (sendLicenseEmail && customerEmail) {
-          await sendLicenseEmail(customerEmail, licenseKey);
-        }
-
-      } catch (err) {
-        console.error("Erro ao salvar licença:", err);
-      }
-    }
-
-    res.json({ received: true });
   }
-);
+}));
 
+// ----------------- Rotas principais -----------------
 
-// =====================================
-// MIDDLEWARES (vem depois do webhook!)
-// =====================================
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Rotas da API (comprar licença, webhook, validar licença, etc.)
+app.use('/api', routes);
 
-
-// =====================================
-// CRIAR CHECKOUT DA STRIPE
-// =====================================
-app.post('/api/create-checkout-session', async (req, res) => {
-  if (!stripe) return res.status(500).json({ error: "Stripe não configurado" });
-
-  const { priceId, customerEmail } = req.body;
-
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      payment_method_types: ['card'],
-      line_items: [
-        { price: priceId, quantity: 1 }
-      ],
-      customer_email: customerEmail,
-      success_url: `${FRONTEND_URL}/auth?success=true`,
-      cancel_url: `${FRONTEND_URL}/auth?cancel=true`,
-    });
-
-    res.json({ ok: true, url: session.url });
-
-  } catch (err) {
-    console.error("Erro Stripe:", err);
-    res.status(500).json({ error: err.message });
-  }
+// Rota simples para teste rápido
+app.get('/', (req, res) => {
+  res.send('Backend de licenças Vida Com Grana está rodando 🚀');
 });
 
-
-// =====================================
-// ROTAS PRINCIPAIS
-// =====================================
-app.use('/api', router);
-
-
-// =====================================
-// 404
-// =====================================
-app.use((req, res) => {
-  res.status(404).json({ error: "not found" });
+// Healthcheck para o Render
+app.get('/health', (req, res) => {
+  res.json({ ok: true, status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// Rota opcional para depuração de ambiente (não mostra segredos)
+app.get('/debug/env', (req, res) => {
+  res.json({
+    ALLOWED_ORIGIN,
+    FRONTEND_URL,
+    has_STRIPE_SECRET_KEY: !!STRIPE_SECRET_KEY,
+    has_STRIPE_WEBHOOK_SECRET: !!STRIPE_WEBHOOK_SECRET,
+    has_SUPABASE_URL: !!SUPABASE_URL,
+    has_SUPABASE_SERVICE_ROLE: !!SUPABASE_SERVICE_ROLE,
+    has_SENDGRID_API_KEY: !!process.env.SENDGRID_API_KEY,
+    EMAIL_FROM: process.env.EMAIL_FROM || null
+  });
+});
 
-// =====================================
-// START SERVER
-// =====================================
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log("Servidor rodando na porta " + port));
+// ----------------- Tratamento de erros -----------------
+app.use((err, req, res, next) => {
+  console.error('[ERROR] Erro não tratado:', err);
+
+  // Se for erro vindo de alguma integração (SendGrid, Stripe etc.)
+  if (err.response && err.response.body) {
+    console.error('[ERROR] Detalhes do provider:', err.response.body);
+  }
+
+  res.status(500).json({
+    ok: false,
+    message: 'Erro interno no servidor. Verifique os logs no Render.',
+  });
+});
+
+// ----------------- Start do servidor -----------------
+app.listen(PORT, () => {
+  console.log('==========================================');
+  console.log(`Backend de licenças rodando na porta ${PORT}`);
+  console.log(`ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}`);
+  console.log(`FRONTEND_URL:  ${FRONTEND_URL}`);
+  console.log(`Stripe ativo?: ${stripe ? 'SIM' : 'NÃO'}`);
+  console.log(`Webhook secret definido?: ${!!STRIPE_WEBHOOK_SECRET}`);
+  console.log(`SendGrid key definida?: ${!!process.env.SENDGRID_API_KEY}`);
+  console.log('==========================================');
+});
