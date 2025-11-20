@@ -1,4 +1,4 @@
-// server/index.js — VERSÃO FINAL CORRIGIDA
+// server/index.js — VERSÃO FINAL 100% CORRIGIDA PARA TABELA "licenses"
 
 const express = require('express');
 const cors = require('cors');
@@ -51,6 +51,9 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
 
   console.log("EVENTO WEBHOOK:", event.type);
 
+  // ===============================
+  // CHECKOUT COMPLETO
+  // ===============================
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
 
@@ -59,30 +62,32 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
       (session.customer_details && session.customer_details.email) ||
       null;
 
-    // Gerar chave de licença
+    // Gera chave de licença
     const licenseKey = 'LIC-' + crypto.randomBytes(6).toString('hex').toUpperCase();
 
     console.log("🟦 Criando licença:", licenseKey, "para:", customerEmail);
 
     try {
+      // INSERE NA TABELA CORRETA "licenses"
       await pool.query(
-        `INSERT INTO user_licenses (user_email, license_key, stripe_session_id, status, created_at)
-         VALUES ($1, $2, $3, 'active', now())`,
-        [customerEmail, licenseKey, session.id]
+        `INSERT INTO licenses (user_id, license_key, used, created_at)
+         VALUES (NULL, $1, false, now())`,
+        [licenseKey]
       );
+
       console.log("🟩 Licença criada no banco.");
     } catch (err) {
-      console.error("Erro salvando licença:", err);
+      console.error("❌ Erro salvando licença:", err);
     }
 
-    // Enviar email (já configurado no routes.js)
+    // Enviar email (vindo do routes.js)
     try {
-      const routesModule = require('./routes');
-      if (routesModule.sendLicenseEmail) {
-        routesModule.sendLicenseEmail(customerEmail, licenseKey);
+      const { sendLicenseEmail } = require('./routes');
+      if (sendLicenseEmail) {
+        sendLicenseEmail(customerEmail, licenseKey);
       }
     } catch (err) {
-      console.log("Erro enviando email:", err.message);
+      console.log("❌ Erro enviando email:", err.message);
     }
   }
 
