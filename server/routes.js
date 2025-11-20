@@ -1,4 +1,4 @@
-// server/routes.js (VERSÃO TOTALMENTE CORRIGIDA PARA USAR A TABELA "licenses")
+// server/routes.js — VERSÃO FINAL E 100% CORRIGIDA PARA TABELA "licenses"
 
 const express = require('express');
 const crypto = require('crypto');
@@ -52,7 +52,6 @@ router.post('/test-create-license', async (req, res) => {
   try {
     const licenseKey = crypto.randomBytes(16).toString("hex");
 
-    // insere licença sem usuário (user_id = null)
     await pool.query(
       `INSERT INTO licenses (user_id, license_key, used, created_at)
        VALUES (NULL, $1, false, now())`,
@@ -69,7 +68,7 @@ router.post('/test-create-license', async (req, res) => {
 });
 
 // ===============================
-// REGISTER (criar usuário + ativar licença)
+// REGISTER — cria usuário e ativa licença
 // ===============================
 router.post('/register', async (req, res) => {
   const schema = z.object({
@@ -79,12 +78,13 @@ router.post('/register', async (req, res) => {
   });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.errors });
+  if (!parsed.success)
+    return res.status(400).json({ error: parsed.error.errors });
 
   const { email, password, licenseKey } = parsed.data;
 
   try {
-    // PROCURA LICENÇA DISPONÍVEL (user_id IS NULL = ainda não usada)
+    // Busca licença ainda não usada
     const licRes = await pool.query(
       `SELECT * FROM licenses WHERE license_key = $1 AND user_id IS NULL LIMIT 1`,
       [licenseKey]
@@ -93,7 +93,7 @@ router.post('/register', async (req, res) => {
     if (!licRes.rows.length)
       return res.status(400).json({ error: "Licença inválida ou já usada" });
 
-    // CRIAR USUÁRIO
+    // Cria usuário
     const hashed = await bcrypt.hash(password, 10);
 
     const userInsert = await pool.query(
@@ -105,7 +105,7 @@ router.post('/register', async (req, res) => {
 
     const userId = userInsert.rows[0].id;
 
-    // ATRIBUIR A LICENÇA AO USUÁRIO
+    // Atualiza licença
     await pool.query(
       `UPDATE licenses
        SET user_id = $1, used = true
@@ -148,10 +148,9 @@ router.post('/login', async (req, res) => {
     const user = userRes.rows[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok)
+      return res.status(401).json({ error: "Credenciais inválidas" });
 
-    if (!ok) return res.status(401).json({ error: "Credenciais inválidas" });
-
-    // Busca licença atribuída ao usuário
     const licRes = await pool.query(
       `SELECT license_key FROM licenses WHERE user_id = $1 LIMIT 1`,
       [user.id]
@@ -170,7 +169,7 @@ router.post('/login', async (req, res) => {
 });
 
 // ===============================
-// VERIFICAR LICENÇA (frontend usa)
+// VERIFICAR LICENÇA
 // ===============================
 router.post('/verify-license', async (req, res) => {
   const { license, email } = req.body;
@@ -190,9 +189,10 @@ router.post('/verify-license', async (req, res) => {
     const lic = licRes.rows[0];
 
     if (email && lic.user_id) {
-      const user = await pool.query(`SELECT email FROM users WHERE id = $1`, [
-        lic.user_id
-      ]);
+      const user = await pool.query(
+        `SELECT email FROM users WHERE id = $1`,
+        [lic.user_id]
+      );
 
       if (user.rows.length && user.rows[0].email !== email)
         return res.json({ valid: false });
@@ -206,4 +206,7 @@ router.post('/verify-license', async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = {
+  router,
+  sendLicenseEmail
+};
