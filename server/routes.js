@@ -1,4 +1,4 @@
-// server/routes.js — VERSÃO FINAL E 100% CORRIGIDA PARA TABELA "licenses"
+// server/routes.js — VERSÃO CORRIGIDA PARA TABELA "licenses"
 
 const express = require('express');
 const crypto = require('crypto');
@@ -14,18 +14,26 @@ const router = express.Router();
 // ===============================
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+  console.log('[SENDGRID] API key configurada.');
+} else {
+  console.log('[SENDGRID] SENDGRID_API_KEY não definida. E-mails serão ignorados.');
 }
 
 async function sendLicenseEmail(toEmail, licenseKey) {
   if (!process.env.SENDGRID_API_KEY) {
-    console.log("SendGrid não configurado, pulando envio de email");
+    console.log('[SENDGRID] Não configurado, pulando envio de email.');
+    return;
+  }
+
+  if (!process.env.EMAIL_FROM) {
+    console.log('[SENDGRID] EMAIL_FROM não definido. Não é possível enviar email.');
     return;
   }
 
   const msg = {
     to: toEmail,
     from: process.env.EMAIL_FROM,
-    subject: "Sua licença VidaComGrana",
+    subject: 'Sua licença VidaComGrana',
     html: `
       <p>Obrigado pela compra!</p>
       <p>Sua licença é:</p>
@@ -36,9 +44,12 @@ async function sendLicenseEmail(toEmail, licenseKey) {
 
   try {
     await sgMail.send(msg);
-    console.log("Email enviado para", toEmail);
+    console.log('[SENDGRID] Email enviado para', toEmail);
   } catch (err) {
-    console.error("Erro no envio do email:", err);
+    console.error('[SENDGRID] Erro no envio do email:', err);
+    if (err.response && err.response.body) {
+      console.error('[SENDGRID] Detalhes:', err.response.body);
+    }
   }
 }
 
@@ -47,10 +58,10 @@ async function sendLicenseEmail(toEmail, licenseKey) {
 // ===============================
 router.post('/test-create-license', async (req, res) => {
   const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "email obrigatório" });
+  if (!email) return res.status(400).json({ error: 'email obrigatório' });
 
   try {
-    const licenseKey = crypto.randomBytes(16).toString("hex");
+    const licenseKey = crypto.randomBytes(16).toString('hex');
 
     await pool.query(
       `INSERT INTO licenses (user_id, license_key, used, created_at)
@@ -62,8 +73,8 @@ router.post('/test-create-license', async (req, res) => {
 
     res.json({ ok: true, licenseKey });
   } catch (err) {
-    console.error("test-create-license error:", err);
-    res.status(500).json({ error: "erro ao criar licença" });
+    console.error('test-create-license error:', err);
+    res.status(500).json({ error: 'erro ao criar licença' });
   }
 });
 
@@ -78,8 +89,9 @@ router.post('/register', async (req, res) => {
   });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success)
+  if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.errors });
+  }
 
   const { email, password, licenseKey } = parsed.data;
 
@@ -90,8 +102,9 @@ router.post('/register', async (req, res) => {
       [licenseKey]
     );
 
-    if (!licRes.rows.length)
-      return res.status(400).json({ error: "Licença inválida ou já usada" });
+    if (!licRes.rows.length) {
+      return res.status(400).json({ error: 'Licença inválida ou já usada' });
+    }
 
     // Cria usuário
     const hashed = await bcrypt.hash(password, 10);
@@ -113,11 +126,10 @@ router.post('/register', async (req, res) => {
       [userId, licenseKey]
     );
 
-    res.json({ ok: true, message: "Usuário criado e licença ativada" });
-
+    res.json({ ok: true, message: 'Usuário criado e licença ativada' });
   } catch (err) {
-    console.error("register error:", err);
-    res.status(500).json({ error: "erro no servidor" });
+    console.error('register error:', err);
+    res.status(500).json({ error: 'erro no servidor' });
   }
 });
 
@@ -131,8 +143,9 @@ router.post('/login', async (req, res) => {
   });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success)
+  if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.errors });
+  }
 
   const { email, password } = parsed.data;
 
@@ -142,14 +155,16 @@ router.post('/login', async (req, res) => {
       [email]
     );
 
-    if (!userRes.rows.length)
-      return res.status(401).json({ error: "Credenciais inválidas" });
+    if (!userRes.rows.length) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
 
     const user = userRes.rows[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok)
-      return res.status(401).json({ error: "Credenciais inválidas" });
+    if (!ok) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
 
     const licRes = await pool.query(
       `SELECT license_key FROM licenses WHERE user_id = $1 LIMIT 1`,
@@ -161,10 +176,9 @@ router.post('/login', async (req, res) => {
       userId: user.id,
       license: licRes.rows[0] || null
     });
-
   } catch (err) {
-    console.error("login error:", err);
-    res.status(500).json({ error: "erro servidor" });
+    console.error('login error:', err);
+    res.status(500).json({ error: 'erro servidor' });
   }
 });
 
@@ -174,8 +188,9 @@ router.post('/login', async (req, res) => {
 router.post('/verify-license', async (req, res) => {
   const { license, email } = req.body;
 
-  if (!license)
-    return res.status(400).json({ valid: false, error: "licença vazia" });
+  if (!license) {
+    return res.status(400).json({ valid: false, error: 'licença vazia' });
+  }
 
   try {
     const licRes = await pool.query(
@@ -183,8 +198,9 @@ router.post('/verify-license', async (req, res) => {
       [license]
     );
 
-    if (!licRes.rows.length)
+    if (!licRes.rows.length) {
       return res.json({ valid: false });
+    }
 
     const lic = licRes.rows[0];
 
@@ -194,19 +210,20 @@ router.post('/verify-license', async (req, res) => {
         [lic.user_id]
       );
 
-      if (user.rows.length && user.rows[0].email !== email)
+      if (user.rows.length && user.rows[0].email !== email) {
         return res.json({ valid: false });
+      }
     }
 
     return res.json({ valid: true });
-
   } catch (err) {
-    console.error("verify-license error", err);
-    return res.status(500).json({ error: "erro servidor" });
+    console.error('verify-license error', err);
+    return res.status(500).json({ error: 'erro servidor' });
   }
 });
 
-module.exports = {
-  router,
-  sendLicenseEmail
-};
+// ===============================
+// EXPORTA APENAS O ROUTER
+// ===============================
+// Isso é o que corrige o erro "Router.use() requires a middleware function but got a Object"
+module.exports = router;
