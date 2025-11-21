@@ -48,7 +48,6 @@ async function sendLicenseEmail(toEmail, licenseKey) {
 
 // ===================== ROTA DE TESTE (adicionar/remover quando quiser) =====================
 router.post('/test-webhook', async (req, res) => {
-  // loga headers e body para confirmar que chegou
   console.log('[TEST-WEBHOOK] Chegou requisição:', {
     headers: req.headers,
     body: req.body,
@@ -158,7 +157,6 @@ router.post('/test-create-license', async (req, res) => {
 });
 
 // ===================== REGISTER / LOGIN / VERIFY =====================
-// (mesmo código que já tínhamos — mantido)
 router.post('/register', async (req, res) => {
   const schema = z.object({ email: z.string().email(), password: z.string().min(6), licenseKey: z.string().min(8) });
   const parsed = schema.safeParse(req.body);
