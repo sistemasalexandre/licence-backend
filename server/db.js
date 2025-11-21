@@ -1,27 +1,27 @@
-// server/db.js — VERSÃO FINAL E OTIMIZADA PARA RENDER
+// server/db.js — Conexão com PostgreSQL no Render (SSL habilitado)
 
 const { Pool } = require('pg');
 
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-  console.error('❌ ERRO: Variável DATABASE_URL não definida.');
+  console.error('❌ ERRO: DATABASE_URL não está definida nas variáveis do Render!');
   process.exit(1);
 }
 
 const pool = new Pool({
   connectionString,
   ssl: {
-    rejectUnauthorized: false
-  }
+    rejectUnauthorized: false, // obrigatório para Render/Supabase/Heroku
+  },
 });
 
-// Testa conexão automaticamente ao iniciar
-pool.connect()
-  .then(() => console.log('🟩 Conectado ao PostgreSQL com sucesso!'))
-  .catch(err => {
-    console.error('❌ ERRO ao conectar no PostgreSQL:', err.message);
-    process.exit(1);
-  });
+pool.on('connect', () => {
+  console.log('[DATABASE] Conectado ao PostgreSQL com sucesso!');
+});
+
+pool.on('error', (err) => {
+  console.error('⚠️ ERRO NO BANCO:', err);
+});
 
 module.exports = pool;
