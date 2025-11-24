@@ -1,8 +1,4 @@
-# Arquivos prontos — cole por cima (server/index.js e auth.html)
 
-Abaixo estão os dois arquivos completos prontos para copiar/colar: **server/index.js** e **auth.html**. Abra o editor do seu projeto e cole cada arquivo no local correspondente (`server/index.js` e no diretório público coloque `auth.html`).
-
----
 
 ## server/index.js
 
