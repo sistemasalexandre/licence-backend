@@ -1,7 +1,16 @@
+# package.json, .env.example e checklist de deploy (Render)
+
+Cole os arquivos abaixo na raiz do projeto e siga o checklist para subir no Render.
+
+---
+
+## package.json
+
+```json
 {
   "name": "licence-backend-api",
   "version": "1.0.0",
-  "description": "Backend para licenças + supabase",
+  "description": "Backend para licenças + Supabase + Stripe",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
@@ -12,9 +21,139 @@
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.0.0",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "stripe": "^11.0.0"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"
   }
 }
+```
+
+---
+
+## .env.example
+
+```bash
+# Supabase
+SUPABASE_URL=https://SEU_PROJECT_ID.supabase.co
+SUPABASE_SERVICE_ROLE=eyJ...SERVICE_ROLE_KEY...
+# (Opcional para leitura pública no frontend)
+SUPABASE_ANON_KEY=eyJ...ANON_KEY...
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...   # opcional, mas recomendado para verificar webhooks
+
+# App
+PORT=3000
+FRONTEND_URL=https://vidacomgrana.pages.dev   # usado para success/cancel urls do checkout
+ALLOWED_ORIGIN=https://vidacomgrana.pages.dev
+
+# Opcional: logs / modo debug
+NODE_ENV=production
+```
+
+---
+
+## Checklist de deploy no Render (passo-a-passo)
+
+1. **Subir o código no GitHub**
+
+   * Confirme que o repositório contém:
+
+     * `server/index.js`
+     * `package.json`
+     * (pasta `server/` se aplicável)
+     * `auth.html` no diretório público do frontend (se frontend no mesmo repo) ou em Pages separado.
+
+2. **Criar um Web Service no Render**
+
+   * No painel Render: **New > Web Service**
+   * Conecte ao repo GitHub
+   * Branch: `main` (ou sua branch principal)
+   * Environment: `Node` / `Docker` dependendo do seu repo (Node padrão funciona)
+   * Build Command: `npm install`
+   * Start Command: `node server/index.js` (ou `npm start`)
+   * Instance Type: Free / Starter (suficiente para testes)
+
+3. **Definir Environment Variables (ENV)**
+
+   * Vá em **Environment** do serviço criado e adicione:
+
+     * `SUPABASE_URL` = `https://<seu>.supabase.co`
+     * `SUPABASE_SERVICE_ROLE` = `<service_role_key>`
+     * `SUPABASE_ANON_KEY` = `<anon_key>` (opcional para frontend)
+     * `STRIPE_SECRET_KEY` = `sk_live_...` (ou `sk_test_...` para testes)
+     * `STRIPE_WEBHOOK_SECRET` = `whsec_...` (se tiver webhook configurado)
+     * `FRONTEND_URL` = `https://vidacomgrana.pages.dev` (ou seu front)
+     * `ALLOWED_ORIGIN` = `https://vidacomgrana.pages.dev`
+     * `PORT` = `3000` (Render costuma sobrescrever, mas setar é seguro)
+   * Salve e re-deploy se necessário.
+
+4. **Configurar Stripe Webhook no painel Stripe**
+
+   * Endpoint URL: `https://<your-render-service>.onrender.com/webhook`
+   * Events: `checkout.session.completed` (basta este evento)
+   * Copie o `Signing secret` e cole em `STRIPE_WEBHOOK_SECRET` no Render
+
+5. **Testes rápidos (após deploy completar)**
+
+   * Verifique Health: `https://<your-render-service>.onrender.com/` → deve retornar `Licence backend OK`.
+
+   * Test register (curl):
+
+     ```bash
+     curl -X POST https://<your-render-service>.onrender.com/api/register \
+       -H 'Content-Type: application/json' \
+       -d '{"email":"teste@example.com","password":"Senha123"}'
+     ```
+
+   * Test login (curl):
+
+     ```bash
+     curl -X POST https://<your-render-service>.onrender.com/api/login \
+       -H 'Content-Type: application/json' \
+       -d '{"email":"teste@example.com","password":"Senha123"}'
+     ```
+
+   * Insert license (SQL) no Supabase SQL Editor (se precisar criar manualmente):
+
+     ```sql
+     INSERT INTO public.licenses (code, license_key, status, created_at)
+     VALUES ('ABC-123-TEST','ABC-123-TEST','available', now())
+     ON CONFLICT (code) DO NOTHING;
+     ```
+
+   * Create checkout session (curl):
+
+     ```bash
+     curl -X POST https://<your-render-service>.onrender.com/api/create-checkout-session \
+       -H 'Content-Type: application/json' \
+       -d '{"priceId":"price_1SUyMaRtlxX0MLkFRup9JN3Y","customerEmail":"cliente@exemplo.com"}'
+     ```
+
+6. **Logs e debugging**
+
+   * Se o serviço falhar ao iniciar, abra **Logs** no Render e copie o erro aqui. Erros comuns:
+
+     * `Cannot find module 'dotenv'` → `npm install` não foi executado. Certifique que `package.json` exista e `npm install` executou no build.
+     * `Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE` → env vars inconsistentes.
+     * Stripe errors → `STRIPE_SECRET_KEY` ausente ou webhook secret inválido.
+
+7. **Após validação em staging**
+
+   * Ative RLS no Supabase (após testarmos e confirmarmos fluxos).
+   * Crie policies para permitir que somente backend (service_role) escreva em `licenses` e `user_licenses` e que clientes autenticados leiam apenas seus dados.
+
+---
+
+## Notas de segurança e boas práticas
+
+* **Nunca** publique `SUPABASE_SERVICE_ROLE` em frontend ou em repositórios públicos. Use-o somente no backend (Render env).
+* Use `STRIPE_WEBHOOK_SECRET` e verifique o `stripe-signature` no webhook para evitar fraudes.
+* Em produção, considere usar HTTPS (Render já fornece) e limitar origens (ALLOWED_ORIGIN).
+
+---
+
+Se quiser, eu já gero também o comando exato para adicionar o serviço no Render usando a CLI (se você quiser automatizar). Deseja isso? (responda sim/não).
