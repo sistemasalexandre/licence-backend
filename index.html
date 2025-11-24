@@ -1,718 +1,224 @@
-<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Controle Financeiro - PATCH</title>
-<style>
-  body{font-family:Inter,Arial,Helvetica,sans-serif;background:#f4f6f9;margin:0;padding-bottom:60px}
-  .container{max-width:1100px;margin:20px auto;padding:12px}
-  .card{background:#fff;padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(11,22,39,0.04);margin-bottom:16px}
-  .btn{padding:8px 12px;border-radius:8px;border:none;color:#fff;cursor:pointer;font-weight:600;background:#246bff}
-  .btn.secondary{background:#6c757d}
-  .btn.danger{background:#e53935}
-  .input, select{width:100%;padding:8px;margin:6px 0;border-radius:8px;border:1px solid #e6e9ee}
-  .modal{position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.45);display:none;align-items:center;justify-content:center;z-index:10001}
-  .dialog{background:#fff;padding:16px;border-radius:10px;width:520px;max-width:96%}
-  #chartTooltip{position:fixed;pointer-events:none;background:rgba(0,0,0,0.85);color:#fff;padding:8px 10px;border-radius:6px;font-size:0.95rem;display:none;z-index:9999}
-  footer{position:fixed;left:0;right:0;bottom:0;height:48px;background:#ffffffcc;display:flex;align-items:center;justify-content:center;border-top:1px solid #eee;font-size:0.95rem}
-  .chart-mode{background:#246bff;border-radius:8px;color:#fff;padding:8px 12px;border:none;font-weight:600;cursor:pointer}
-  .chart-mode.active{background:#e53935;color:#fff}
+// server/index.js
+// Reference image (for your debug): file:///mnt/data/0a4f4c0f-4777-460a-86ab-eaa95d7c55f2.png
 
-  /* demo overlay */
-  #demoLockOverlay{
-    position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.75);display:none;align-items:center;justify-content:center;z-index:100000;
-    color:#fff;padding:20px;text-align:center;font-size:1.1rem;
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const { createClient } = require('@supabase/supabase-js');
+const Stripe = require('stripe');
+const crypto = require('crypto');
+
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // optional, but recommended
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE in env');
+  process.exit(1);
+}
+if (!STRIPE_SECRET_KEY) {
+  console.warn('Warning: STRIPE_SECRET_KEY not set. Payments will fail.');
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
+const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
+
+function genLicenseCode(prefix = ''){
+  // generate an easy-to-read license code like ABCD-1234-EFGH
+  const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
+  return (prefix ? prefix + '-' : '') + `${part()}-${part()}-${part()}`;
+}
+
+/* Health */
+app.get('/', (req, res) => res.send('Licence backend OK'));
+
+/* ---------- AUTH endpoints (register/login) ---------- */
+app.post('/api/register', async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
+
+    // check existing
+    const { data: exists } = await supabase.from('users').select('id').eq('email', email).limit(1);
+    if (exists && exists.length) return res.status(400).json({ error: 'Usuário já existe' });
+
+    const hash = await bcrypt.hash(password, 10);
+    const payload = { email, password_hash: hash };
+    if (name) payload.name = name;
+
+    const { data, error } = await supabase.from('users').insert([payload]).select();
+    if (error) throw error;
+    const user = data[0];
+    res.json({ ok: true, user: { id: user.id, email: user.email } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'erro' });
   }
-  #demoLockOverlay .box{background:linear-gradient(90deg,#5b8def,#2bbbad);padding:22px;border-radius:12px;max-width:720px}
-  .cf-disabled { opacity: 0.5; pointer-events: none; }
-</style>
-
-<style>
-/* === Theme V2: Dark + animations === */
-:root{
-  --bg:#0b1220; --card:#0f1724; --text:#e6eef8; --muted:#94a3b8;
-  --accent:#246bff; --danger:#e53935; --glass: rgba(255,255,255,0.03);
-  --radius-xl:18px;
-}
-/* Light theme variables (used when .light-theme on body) */
-body.light-theme{
-  --bg:#f4f6f9; --card:#ffffff; --text:#0b1220; --muted:#6c757d; --glass: rgba(0,0,0,0.02);
-}
-/* Base */
-body{background:var(--bg);color:var(--text);transition:background .35s ease,color .35s ease}
-.card{background:var(--card);box-shadow:0 8px 30px rgba(2,6,23,0.35);border-radius:var(--radius-xl);transition:transform .18s ease,box-shadow .18s ease}
-.topbar.card{display:flex;align-items:center;justify-content:space-between;padding:14px}
-.btn{background:var(--accent);box-shadow:0 6px 18px rgba(36,107,255,0.08);transition:transform .12s ease,box-shadow .12s ease}
-.btn.secondary{background:transparent;color:var(--text);border:1px solid rgba(255,255,255,0.06)}
-.btn:active{transform:translateY(1px) scale(.998)}
-.input,select{background:transparent;color:var(--text);border:1px solid rgba(255,255,255,0.06)}
-table th, table td{border-bottom:1px solid rgba(255,255,255,0.03)}
-/* modal animation */
-.modal .dialog{transform:translateY(8px) scale(.99);opacity:0;transition:transform .28s cubic-bezier(.2,.9,.2,1),opacity .28s ease}
-.modal.show .dialog{transform:translateY(0) scale(1);opacity:1}
-/* toast */
-.cf-toast{position:fixed;right:20px;bottom:20px;background:linear-gradient(90deg,var(--accent),#1fb3ff);color:#fff;padding:10px 14px;border-radius:12px;box-shadow:0 10px 30px rgba(2,6,23,0.4);transform:translateY(12px);opacity:0;transition:transform .28s ease,opacity .28s ease;z-index:999999}
-.cf-toast.show{transform:translateY(0);opacity:1}
-/* table hover */
-#tblTrans tbody tr:hover{transform:translateY(-4px);box-shadow:0 6px 18px rgba(2,6,23,0.18);background:linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))}
-/* chart transitions */
-#chartCanvas{transition:opacity .3s ease, transform .28s ease}
-/* reduce motion preference */
-@media (prefers-reduced-motion: reduce){
-  *{transition:none!important;animation:none!important}
-}
-</style>
-<style>
-/* CF PATCH: modal dialog background in dark theme -> match Receita (blue gradient) */
-body.dark-theme .modal .dialog{
-  background: linear-gradient(90deg,#5b8def,#2bbbad) !important;
-  color: #fff !important;
-  box-shadow: 0 12px 40px rgba(11,22,39,0.5) !important;
-}
-/* Ensure inputs inside modal are visible on dark gradient */
-body.dark-theme .modal .dialog .input,
-body.dark-theme .modal .dialog select{
-  background: rgba(255,255,255,0.06) !important;
-  color: #fff !important;
-  border: 1px solid rgba(255,255,255,0.12) !important;
-}
-body.dark-theme .modal .dialog label{
-  color: rgba(234,244,255,0.95) !important;
-}
-/* keep modal overlay slightly darker */
-body.dark-theme .modal{ background: rgba(5,8,15,0.65) !important; }
-</style>
-</head>
-<body>
-
-<!-- ================= ACCESS PROTECTION (top) ================= -->
-<script>
-/*
-  Proteção de acesso:
-  - se não houver cf_auth_token -> auth.html
-  - se token expirado -> auth.html
-  - se email === 'demo@local' -> index_modified_for_demo.html
-  - se usuário não ativado (cf_auth_v1[email].activated !== true) -> index_modified_for_demo.html
-*/
-(function(){
-  try{
-    const path = window.location.pathname || '';
-    // allow direct local dev on localhost
-    const allowLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-    const tokenRaw = localStorage.getItem('cf_auth_token');
-    if(!allowLocal){
-      if(!tokenRaw){
-        window.location.replace('auth.html');
-        return;
-      }
-    }
-    let token = null;
-    try {
-      token = tokenRaw ? JSON.parse(tokenRaw) : null;
-    } catch(e) {
-      localStorage.removeItem('cf_auth_token');
-      window.location.replace('auth.html');
-      return;
-    }
-    if(!token){
-      window.location.replace('auth.html'); return;
-    }
-    if(token.expires && Date.now() > token.expires){
-      localStorage.removeItem('cf_auth_token');
-      window.location.replace('auth.html'); return;
-    }
-    const email = token.email;
-    if(!email){
-      localStorage.removeItem('cf_auth_token');
-      window.location.replace('auth.html'); return;
-    }
-    if(email === 'demo@local'){
-      // demo users redirected to demo page
-      if(!path.endsWith('index_modified_for_demo.html')) window.location.replace('index_modified_for_demo.html');
-      return;
-    }
-    // check local activation flag
-    try{
-      const users = JSON.parse(localStorage.getItem('cf_auth_v1') || '{}');
-      const rec = users[email];
-      if(!rec || !rec.activated){
-        if(!path.endsWith('index_modified_for_demo.html')) window.location.replace('index_modified_for_demo.html');
-        return;
-      }
-    }catch(e){
-      window.location.replace('auth.html'); return;
-    }
-    // otherwise allowed to proceed
-  }catch(e){
-    try{ console.error('Proteção: ', e); }catch(_){} 
-    try{ window.location.replace('auth.html'); }catch(_){} 
-  }
-})();
-</script>
-<!-- ================= END ACCESS PROTECTION ================= -->
-
-<!-- DEMO LOCK OVERLAY -->
-<div id="demoLockOverlay" role="dialog" aria-hidden="true">
-  <div class="box">
-    <h2>Versão de Demonstração — Limite Atingido</h2>
-    <p>Você atingiu o limite da versão de demonstração. Para continuar usando o aplicativo compre uma licença e ative-a no login.</p>
-    <p><a href="auth.html" style="color:#fff;text-decoration:underline;font-weight:700">Voltar para ativação / compra</a></p>
-  </div>
-</div>
-
-<div class="container">
-  <div class="topbar card" style="display:flex;align-items:center;justify-content:space-between">
-    <h2 style="margin:0">Controle Financeiro</h2>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button id="themeToggle" class="btn secondary" title="Alternar tema">🌙 Tema</button>
-    </div>
-    
-    <div style="display:flex;gap:8px;align-items:center">
-      <button id="btnExportJson" class="btn">Efetuar BKP</button>
-      <button id="btnImportJson" class="btn">Importar BKP</button>
-      <button id="btnExportCsv" class="btn">Exportar CSV</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div><strong>Resumo Mensal</strong></div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <select id="selMonth" class="input" style="width:140px;display:inline-block"></select>
-        <select id="selYear" class="input" style="width:140px;display:inline-block"></select>
-      </div>
-    </div>
-    <div style="display:flex;gap:12px;margin-top:14px">
-      <div class="card" style="flex:1;background:linear-gradient(90deg,#5b8def,#2bbbad);color:#fff"><div>Receita</div><h3 id="txtReceita">R$ 0,00</h3></div>
-      <div class="card" style="flex:1;background:linear-gradient(90deg,#ff7a7a,#ffb36b);color:#fff"><div>Despesas</div><h3 id="txtDespesa">R$ 0,00</h3></div>
-      <div class="card" style="flex:1;background:linear-gradient(90deg,#6ee7b7,#34d399);color:#fff"><div>Saldo</div><h3 id="txtSaldo">R$ 0,00</h3></div>
-      <div class="card" style="flex:1;background:linear-gradient(90deg,#9f7aea,#7c3aed);color:#fff"><div>Investimentos</div><h3 id="txtInvest">R$ 0,00</h3></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <strong>Transações</strong>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button id="btnAdd" class="btn">Adicionar</button>
-        <button id="btnClear" class="btn danger">Limpar Tudo</button>
-      </div>
-    </div>
-    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <div style="min-width:260px">
-        <input id="newCatName" class="input" placeholder="Nova categoria (ex: Lanches)">
-      </div>
-      <div style="min-width:200px">
-        <select id="newCatType" class="input">
-          <option value="despesa">Despesa</option>
-          <option value="receita">Receita</option>
-          <option value="investimento">Investimento</option>
-        </select>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button id="btnAddCat" class="btn">Criar Categoria</button>
-      </div>
-    </div>
-
-    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
-      <div style="min-width:260px">
-        <select id="existingCats" class="input"></select>
-      </div>
-      <div style="min-width:200px">
-        <button id="btnDelCat" class="btn danger">Excluir Categoria Selecionada</button>
-      </div>
-    </div>
-
-    <table id="tblTrans" style="width:100%;margin-top:12px;border-collapse:collapse">
-      <thead><tr><th style="text-align:left;padding:10px;border-bottom:1px solid #eee">Data</th><th style="padding:10px;border-bottom:1px solid #eee">Tipo</th><th style="padding:10px;border-bottom:1px solid #eee">Categoria</th><th style="padding:10px;border-bottom:1px solid #eee">Valor</th><th style="padding:10px;border-bottom:1px solid #eee">Descrição</th><th style="padding:10px;border-bottom:1px solid #eee">Anexo</th><th style="padding:10px;border-bottom:1px solid #eee"></th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <strong>Gráficos</strong>
-      <div style="display:flex;gap:8px">
-        <button class="chart-mode" data-mode="despesa">Despesas</button>
-        <button class="chart-mode" data-mode="receita">Receita</button>
-        <button class="chart-mode" data-mode="investimento">Investimentos</button>
-        <button class="chart-mode" data-mode="saldo">Saldo</button>
-      </div>
-    </div>
-    <div style="position:relative;display:flex;gap:18px;align-items:flex-start">
-      <canvas id="chartCanvas" width="600" height="360" style="background:transparent;border-radius:8px"></canvas>
-      <div id="chartLegend" class="legend"></div>
-      <div id="chartTooltip"></div>
-    </div>
-  </div>
-</div>
-
-<div class="modal" id="modal" aria-hidden="true">
-  <div class="dialog">
-    <h3 id="modalTitle">Adicionar transação</h3>
-    <label>Tipo</label>
-    <select id="mTipo" class="input"><option value="despesa">Despesa</option><option value="receita">Receita</option><option value="investimento">Investimento</option></select>
-    <label>Categoria</label>
-    <select id="mCat" class="input"></select>
-    <label>Valor</label><input id="mValor" class="input" type="number" step="0.01">
-    <label>Data</label><input id="mData" class="input" type="date">
-    <label>Descrição</label><input id="mDesc" class="input" type="text">
-    <label>Anexo (PDF/Imagem)</label><input id="mFile" class="input" type="file" accept=".pdf,image/*">
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
-      <button id="btnSave" class="btn">Salvar</button>
-      <button id="btnClose" class="btn secondary">Fechar</button>
-    </div>
-  </div>
-</div>
-
-<footer>Controle Financeiro V1 - Desenvolvido por Alexandre Mateus</footer>
-
-<script>
-// DEMO helpers (global) - uses localStorage key: cf_demo_usage_v1
-(function(){
-  const DEMO_KEY = 'cf_demo_usage_v1';
-  const DEMO_LIMITS = { transactions: 5, categories_create: 5, categories_delete: 5 };
-
-  function isDemoUser(){ try{ const t = JSON.parse(localStorage.getItem('cf_auth_token')||'null'); return t && t.email === 'demo@local'; }catch(e){ return false; } }
-  function demoLoad(){ try{ return JSON.parse(localStorage.getItem(DEMO_KEY) || '{}'); }catch(e){ return {}; } }
-  function demoSave(obj){ localStorage.setItem(DEMO_KEY, JSON.stringify(obj)); }
-  function demoCount(type){ const s = Object.assign({transactions:0,categories_create:0,categories_delete:0}, demoLoad()); return s[type]||0; }
-
-  function demoLockUI(){
-    try{
-      const ov = document.getElementById('demoLockOverlay');
-      if(ov) ov.style.display = 'flex';
-      Array.from(document.querySelectorAll('button,input,select,textarea')).forEach(el=>{
-        // keep auth link and anchors enabled; disable interactive controls
-        if(el.tagName && el.tagName.toLowerCase() === 'a') return;
-        el.disabled = true;
-        el.classList && el.classList.add('cf-disabled');
-      });
-      const modal = document.getElementById('modal'); if(modal) modal.style.display='none';
-    }catch(e){ console.error('demoLockUI', e); }
-  }
-
-  function demoIncrement(type){
-    if(!isDemoUser()) return;
-    const s = Object.assign({transactions:0,categories_create:0,categories_delete:0}, demoLoad());
-    s[type] = (s[type]||0) + 1;
-    demoSave(s);
-    if(s[type] >= (DEMO_LIMITS[type] || 0)) demoLockUI();
-  }
-
-  function demoLocked(type){ return demoCount(type) >= (DEMO_LIMITS[type] || 0); }
-
-  // expose
-  window.demoIncrement = demoIncrement;
-  window.demoLocked = demoLocked;
-  window.isDemoUser = isDemoUser;
-  window.demoLoad = demoLoad;
-  window.demoSave = demoSave;
-
-  // on load, apply lock if needed (some parts of UI are created after DOMContentLoaded, will also check later)
-  document.addEventListener('DOMContentLoaded', function(){
-    try{
-      if(isDemoUser() && demoLocked('transactions')) demoLockUI();
-    }catch(e){}
-  });
-})();
-</script>
-
-<script>
-// Patch: initialize on DOMContentLoaded and catch runtime errors to surface them to the user.
-window.addEventListener('error', function(e){
-  try{ alert('Erro detectado: ' + (e && e.message ? e.message : e)); }catch(_){}
 });
 
-document.addEventListener('DOMContentLoaded', function(){
-  try{
-    (function(){
-      const KEY = 'controle_financeiro_v1';
-      const FILE_STORE = 'controle_financeiro_files_v1';
-      let state = { categorias: [], transacoes: [] };
-      let editingId = null;
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
 
-      function openIdb(){ return new Promise((resolve,reject)=>{ if(!('indexedDB' in window)){ reject(new Error('IndexedDB não disponível')); return; } const r=indexedDB.open('controle_financeiro_v1',1); r.onupgradeneeded = e => { const db=e.target.result; if(!db.objectStoreNames.contains(FILE_STORE)) db.createObjectStore(FILE_STORE,{keyPath:'id'}); }; r.onsuccess = e => resolve(e.target.result); r.onerror = e => reject(e); }); }
-      async function saveFile(id,file){ try{ const db=await openIdb(); const tx=db.transaction(FILE_STORE,'readwrite'); const store=tx.objectStore(FILE_STORE); return new Promise((res,rej)=>{ const rec={id,blob:file,name:file.name,type:file.type,created:Date.now()}; const req=store.put(rec); req.onsuccess=()=>{db.close();res(true)}; req.onerror=(e)=>{db.close();rej(e)}; }); }catch(e){ console.warn('saveFile: IndexedDB indisponível',e); throw e; } }
-      async function getFile(id){ try{ const db=await openIdb(); return new Promise((res,rej)=>{ const tx=db.transaction(FILE_STORE,'readonly'); const store=tx.objectStore(FILE_STORE); const rq=store.get(id); rq.onsuccess=()=>{db.close();res(rq.result)}; rq.onerror=()=>{db.close();rej(rq.error)}; }); }catch(e){ console.warn('getFile: IndexedDB indisponível',e); return null; } }
+    const { data } = await supabase.from('users').select('*').eq('email', email).limit(1);
+    const user = data && data[0];
+    if (!user) return res.status(400).json({ error: 'Usuário não encontrado' });
 
-      function $(id){ return document.getElementById(id); }
-      function currency(v){ return 'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2}); }
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Senha incorreta' });
 
-      function load(){ try{ const txt=localStorage.getItem(KEY); if(txt) state=JSON.parse(txt); if(!state.categorias || state.categorias.length===0) initDefaults(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); setActiveChartButton(chartMode); // demo: if demo user and locked -> block UI
-          if(window.isDemoUser && window.isDemoUser() && window.demoLocked && window.demoLocked('transactions')) {
-            const ov = document.getElementById('demoLockOverlay');
-            if(ov) ov.style.display='flex';
-            Array.from(document.querySelectorAll('button,input,select,textarea')).forEach(el=>{
-              if(el.tagName && el.tagName.toLowerCase()==='a') return;
-              el.disabled = true; el.classList && el.classList.add('cf-disabled');
-            });
-          }
-        }catch(e){ console.error(e); state={categorias:[],transacoes:[]}; initDefaults(); } }
-      function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
+    // check license association
+    const { data: ul } = await supabase.from('user_licenses').select('*').eq('user_email', email).limit(1);
+    const hasLicense = ul && ul.length > 0;
 
-      function initDefaults(){ const defs=[ ['Alimentação','despesa'],['Luz','despesa'],['Condomínio','despesa'],['Cartão de Crédito','despesa'],['Viagem','despesa'], ['Caixinha','investimento'],['Ações','investimento'],['Tesouro Direto','investimento'],['Fundos Imobiliários','investimento'], ['Salário','receita'],['Dividendos','receita'],['Outros','receita'] ]; state.categorias = defs.map((d,i)=>({id:'cat_'+i,nome:d[0],tipo:d[1]})); state.transacoes = state.transacoes || []; save(); }
-
-      function renderCats(){ const sel=$('mCat'); if(!sel) return; sel.innerHTML=''; state.categorias.forEach(c=>{ const o=document.createElement('option'); o.value=c.id; o.text=c.nome; sel.appendChild(o); }); }
-      function renderExistingCats(){ const sel=$('existingCats'); if(!sel) return; sel.innerHTML=''; state.categorias.forEach(c=>{ const o=document.createElement('option'); o.value=c.id; o.text=c.nome + ' ('+c.tipo+')'; sel.appendChild(o); }); }
-
-      // CREATE CATEGORY: increment demo counter if demo user
-      $('btnAddCat').onclick = function(){
-        const name = $('newCatName').value.trim();
-        const tipo = $('newCatType').value;
-        if(!name){ alert('Digite o nome da categoria'); return; }
-        const id = 'cat_'+Date.now();
-        state.categorias.push({id,nome:name,tipo:tipo});
-        save(); renderCats(); renderExistingCats(); $('newCatName').value='';
-        alert('Categoria criada: ' + name);
-        try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('categories_create'); }catch(e){}
-      };
-
-      // delete category
-      $('btnDelCat').onclick = function(){
-        const sel = $('existingCats');
-        if(!sel){ alert('Nenhuma categoria disponível'); return; }
-        const id = sel.value;
-        if(!id){ alert('Selecione uma categoria para excluir'); return; }
-        const cat = state.categorias.find(c=>c.id===id);
-        if(!cat){ alert('Categoria não encontrada'); return; }
-        const related = state.transacoes.filter(t=>t.categoria_id===id);
-        if(related.length>0){
-          if(!confirm('Essa categoria tem '+related.length+' transações. Ao excluir, essas transações ficarão sem categoria. Confirma excluir?')) return;
-          state.transacoes = state.transacoes.map(t=> t.categoria_id===id ? Object.assign({},t,{categoria_id: null}) : t);
-        }
-        state.categorias = state.categorias.filter(c=>c.id!==id);
-        save(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); alert('Categoria excluída');
-        try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('categories_delete'); }catch(e){}
-      };
-
-      function renderTable(){ const tbody = document.querySelector('#tblTrans tbody'); if(!tbody) return; tbody.innerHTML=''; const m=parseInt($('selMonth').value|| (new Date().getMonth()+1)), y=parseInt($('selYear').value|| new Date().getFullYear()); const trans = state.transacoes.filter(t=>{ const d=new Date(t.data); return d.getMonth()+1===m && d.getFullYear()===y; }).sort((a,b)=>b.data.localeCompare(a.data)); trans.forEach(t=>{ const tr=document.createElement('tr'); const cat = state.categorias.find(c=>c.id===t.categoria_id); const arquivoLink = t.arquivo?`<a href="#" class="link open-file" data-id="${t.arquivo}">Abrir</a>`:''; tr.innerHTML=`<td style="padding:10px">${t.data}</td><td style="padding:10px">${t.tipo}</td><td style="padding:10px">${cat?cat.nome:'Sem'}</td><td style="padding:10px">${currency(t.valor)}</td><td style="padding:10px">${t.descricao||''}</td><td style="padding:10px">${arquivoLink}</td><td style="padding:10px"><button class="btn edit-btn" data-id="${t.id}">Editar</button> <button class="btn danger del-btn" data-id="${t.id}">Excluir</button></td>`; tbody.appendChild(tr); }); // attach handlers safely
-        Array.from(document.querySelectorAll('.del-btn')).forEach(b=>{ b.onclick=(e)=>{ const id=e.target.dataset.id; if(confirm('Excluir transação?')){ state.transacoes = state.transacoes.filter(x=>x.id!==id); save(); renderTable(); renderSummary(); renderChart(); } }; });
-        Array.from(document.querySelectorAll('.edit-btn')).forEach(b=>{ b.onclick=(e)=>{ openModal(e.target.dataset.id); }; });
-        Array.from(document.querySelectorAll('.open-file')).forEach(a=>a.onclick=async e=>{ e.preventDefault(); const id=e.target.dataset.id; try{ const rec=await getFile(id); if(rec && rec.blob){ const url=URL.createObjectURL(rec.blob); const w = window.open(); if(w){ if(rec.type && rec.type.startsWith('image/')){ w.document.write('<img src="'+url+'" style="max-width:100%"/>'); } else if(rec.type==='application/pdf'){ w.document.write('<iframe src="'+url+'" style="width:100%;height:100vh;border:none"></iframe>'); } else { w.location.href = url; } } else { window.location.href = url; } setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(e){} },30000); } else { alert('Arquivo não encontrado'); } }catch(err){ console.error(err); alert('Arquivo não encontrado'); } }); }
-
-      function renderSummary(){ const m=parseInt($('selMonth').value|| (new Date().getMonth()+1)), y=parseInt($('selYear').value|| new Date().getFullYear()); const trans = state.transacoes.filter(t=>{ const d=new Date(t.data); return d.getMonth()+1===m && d.getFullYear()===y; }); let receita=0, despesa=0, invest=0; trans.forEach(t=>{ if(t.tipo==='receita') receita+=t.valor; else if(t.tipo==='despesa') despesa+=t.valor; else if(t.tipo==='investimento') invest+=t.valor; }); $('txtReceita').textContent=currency(receita); $('txtDespesa').textContent=currency(despesa); $('txtInvest').textContent=currency(invest); $('txtSaldo').textContent=currency(receita-despesa); }
-
-      function fillMonthYear(){ const selM=$('selMonth'), selY=$('selYear'); if(!selM||!selY) return; selM.innerHTML=''; const months=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']; months.forEach((m,i)=>{ const o=document.createElement('option'); o.value=i+1; o.text=m; selM.appendChild(o); }); const y=new Date().getFullYear(); selY.innerHTML=''; for(let i=y-5;i<=y+5;i++){ const o=document.createElement('option'); o.value=i; o.text=i; selY.appendChild(o); } selM.value=new Date().getMonth()+1; selY.value=new Date().getFullYear(); selM.onchange=()=>{ renderTable(); renderSummary(); renderChart(); }; selY.onchange=()=>{ renderTable(); renderSummary(); renderChart(); }; }
-
-      let chartMode='despesa'; const chartCanvas = $('chartCanvas'); const chartCtx = chartCanvas && chartCanvas.getContext? chartCanvas.getContext('2d') : null; let chartSlices = []; let hoverIndex = -1;
-      function renderChart(){ if(!chartCtx) return; chartSlices = []; hoverIndex = -1; const m=parseInt($('selMonth').value|| (new Date().getMonth()+1)), y=parseInt($('selYear').value|| new Date().getFullYear()); const trans = state.transacoes.filter(t=>{ const d=new Date(t.data); return d.getMonth()+1===m && d.getFullYear()===y; }); const agg={}; if(chartMode==='saldo'){ let ganhos=0,gastos=0; trans.forEach(t=>{ if(t.tipo==='receita') ganhos+=t.valor; else if(t.tipo==='despesa') gastos+=t.valor; }); drawDonut(['Despesas','Receita'], [gastos, ganhos]); const saldo = ganhos - gastos; let legendHtml = ''; if(saldo >= 0){ legendHtml = '<div>Saldo: <span style="color:#2196f3;font-weight:700">+' + currency(saldo) + '</span></div>'; } else { legendHtml = '<div>Saldo: <span style="color:#e53935;font-weight:700">-' + currency(Math.abs(saldo)) + '</span></div>'; } const legend = $('chartLegend'); if(legend) legend.innerHTML = legendHtml; return; } trans.forEach(t=>{ if(t.tipo===chartMode){ const cat = (state.categorias.find(c=>c.id===t.categoria_id)||{nome:'Sem'}).nome; agg[cat] = (agg[cat]||0) + t.valor; }}); const labels = Object.keys(agg); const values = labels.map(l=>agg[l]); if(values.length===0){ drawDonut(['Sem dados'], [1]); const legend = $('chartLegend'); if(legend) legend.innerHTML=''; return; } drawDonut(labels, values); const legend = $('chartLegend'); if(legend) legend.innerHTML=''; }
-
-      function drawDonut(labels, values){ if(!chartCtx) return; const ctx = chartCtx; const c = chartCanvas; ctx.clearRect(0,0,c.width,c.height); const total = values.reduce((a,b)=>a+b,0)||1; const cx = c.width/2, cy = c.height/2; const outerR = Math.min(c.width,c.height)/3; const innerR = outerR * 0.55; const shadowOffset = 8;
-        ctx.save();
-        ctx.translate(0, shadowOffset/2);
-        ctx.beginPath(); ctx.ellipse(cx, cy, outerR, outerR*0.85, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(20,30,60,0.06)'; ctx.fill(); ctx.restore();
-        let start = -0.5*Math.PI; chartSlices = [];
-        for(let i=0;i<values.length;i++){ const v = values[i]; const slice = (v/total)*(Math.PI*2); const end = start + slice;
-          const hue = (i*43)%360; const color1 = `hsl(${hue} 70% 55%)`; const color2 = `hsl(${(hue+20)%360} 70% 35%)`;
-          const midAngle = start + slice/2; const grad = ctx.createLinearGradient(cx + Math.cos(midAngle)*innerR, cy + Math.sin(midAngle)*innerR, cx + Math.cos(midAngle)*outerR, cy + Math.sin(midAngle)*outerR);
-          grad.addColorStop(0, color1); grad.addColorStop(1, color2);
-          const isHover = (i === hoverIndex);
-          const offset = isHover ? 10 : 0;
-          const ox = Math.cos(midAngle) * offset; const oy = Math.sin(midAngle) * offset;
-          ctx.beginPath();
-          ctx.moveTo(cx + ox, cy + oy);
-          ctx.arc(cx + ox, cy + oy, outerR, start, end);
-          ctx.lineTo(cx + ox + Math.cos(end)*(innerR), cy + oy + Math.sin(end)*(innerR));
-          ctx.arc(cx + ox, cy + oy, innerR, end, start, true);
-          ctx.closePath();
-          ctx.fillStyle = grad;
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(cx + ox, cy + oy, outerR, start, end);
-          ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-          ctx.lineWidth = 1.2;
-          ctx.stroke();
-          chartSlices.push({start, end, label: labels[i], value: values[i], color: color1, mid: midAngle});
-          start = end;
-        }
-        ctx.beginPath(); ctx.arc(cx, cy, innerR*0.96, 0, Math.PI*2); ctx.fillStyle = '#ffffff'; ctx.fill();
-        ctx.fillStyle = '#333'; ctx.font = '600 16px Arial'; ctx.textAlign='center';
-        ctx.fillText('Total', cx, cy-6);
-        ctx.font = '700 18px Arial';
-        ctx.fillText(currency(total), cx, cy+18);
-      }
-
-      const tooltip = $('chartTooltip');
-      if(chartCanvas) {
-        chartCanvas.addEventListener('mousemove', function(e){ const rect = chartCanvas.getBoundingClientRect(); const x = e.clientX - rect.left; const y = e.clientY - rect.top; const cx = chartCanvas.width/2, cy = chartCanvas.height/2; const dx = x - cx, dy = y - cy; const dist = Math.sqrt(dx*dx+dy*dy); let ang = Math.atan2(dy,dx); if(ang < -0.5*Math.PI) ang += Math.PI*2; const foundIdx = chartSlices.findIndex(s => ang >= s.start && ang <= s.end); if(foundIdx !== -1 && dist > (Math.min(chartCanvas.width, chartCanvas.height)/3)*0.55 && dist < (Math.min(chartCanvas.width, chartCanvas.height)/3)*1.05){ const found = chartSlices[foundIdx]; if(tooltip){ tooltip.style.display='block'; tooltip.style.left = (e.clientX + 12) + 'px'; tooltip.style.top = (e.clientY + 12) + 'px'; tooltip.innerHTML = `<div style="font-weight:700">${found.label}</div><div>${currency(found.value)}</div>`; } hoverIndex = foundIdx; renderChart(); } else { if(tooltip) tooltip.style.display='none'; if(hoverIndex !== -1){ hoverIndex = -1; renderChart(); } } });
-        chartCanvas.addEventListener('mouseout', ()=>{ if(tooltip) tooltip.style.display='none'; if(hoverIndex !== -1){ hoverIndex = -1; renderChart(); } });
-      }
-
-      function openModal(editId){ editingId = editId || null; const modal = $('modal'); if(!modal) return; modal.style.display='flex'; $('modalTitle').textContent = editId ? 'Editar transação' : 'Adicionar transação'; if(editId){ const rec = state.transacoes.find(t=>t.id===editId); if(rec){ $('mTipo').value=rec.tipo; $('mCat').value=rec.categoria_id; $('mValor').value=rec.valor; $('mData').value=rec.data; $('mDesc').value=rec.descricao||''; } } else { $('mTipo').value='despesa'; $('mCat').value = state.categorias.length?state.categorias[0].id:''; $('mValor').value=''; $('mData').value=new Date().toISOString().slice(0,10); $('mDesc').value=''; try{ const mv = $('mValor'); if(mv) mv.focus(); }catch(_){} } }
-      function closeModal(){ const modal=$('modal'); if(modal) modal.style.display='none'; editingId=null; const f=$('mFile'); if(f) f.value=''; }
-
-      document.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ const modal=$('modal'); if(modal && modal.style.display==='flex') closeModal(); } });
-
-      // SAVE: when creating a NEW transaction (editingId falsy), increment demo counter if demo user
-      $('btnClose').onclick = closeModal;
-      $('btnSave').onclick = async function(){
-        try{
-          const tipo=$('mTipo').value; const cid=$('mCat').value; const valor=parseFloat($('mValor').value); const dataStr=$('mData').value; const desc=$('mDesc').value;
-          if(!cid){ alert('Escolha categoria'); return; }
-          if(isNaN(valor)||valor<=0){ alert('Valor inválido'); return; }
-          let fileId=null; const f=$('mFile').files[0];
-          if(f){ fileId='f_'+Date.now(); try{ await saveFile(fileId,f); }catch(e){ console.error(e); alert('Falha ao salvar arquivo (IndexedDB)'); fileId=null; } }
-          if(editingId){
-            const idx=state.transacoes.findIndex(t=>t.id===editingId);
-            if(idx>=0){
-              state.transacoes[idx].tipo=tipo;
-              state.transacoes[idx].categoria_id=cid;
-              state.transacoes[idx].valor=valor;
-              state.transacoes[idx].data=dataStr;
-              state.transacoes[idx].descricao=desc;
-              if(fileId) state.transacoes[idx].arquivo=fileId;
-            }
-          } else {
-            const id='t_'+Date.now();
-            state.transacoes.push({id,tipo,categoria_id:cid,valor,data:dataStr,descricao:desc,arquivo:fileId});
-            // demo increment (new transaction created)
-            try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('transactions'); }catch(e){}
-          }
-          save(); renderTable(); renderSummary(); renderChart(); closeModal();
-        }catch(e){ console.error(e); alert('Erro: '+(e && e.message? e.message : e)); }
-      };
-
-      $('btnExportJson').onclick = function(){ try{ const blob = new Blob([JSON.stringify(state)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='controle_financeiro_backup.json'; a.click(); setTimeout(()=>{ try{ URL.revokeObjectURL(url);}catch(e){} },1000); }catch(e){ alert('Erro ao exportar: '+e.message); } };
-      $('btnExportCsv').onclick = function(){ try{ let csv = 'data,tipo,categoria,valor,descricao,arquivo\n'; state.transacoes.forEach(t=>{ const cat=(state.categorias.find(c=>c.id===t.categoria_id)||{nome:''}).nome; csv+=`"${t.data}","${t.tipo}","${cat}",${t.valor},"${(t.descricao||'').replace(/"/g,'""')}","${t.arquivo||''}"\n`; }); const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='controle_financeiro.csv'; a.click(); setTimeout(()=>{ try{ URL.revokeObjectURL(url);}catch(e){} },1000); }catch(e){ alert('Erro ao exportar CSV: '+e.message); } };
-      $('btnImportJson').onclick = function(){ try{ const inp=document.createElement('input'); inp.type='file'; inp.accept='.json'; inp.onchange=()=>{ const f=inp.files[0]; const r=new FileReader(); r.onload=()=>{ try{ const obj=JSON.parse(r.result); if(obj.categorias && obj.transacoes){ state=obj; save(); load(); alert('Importado'); } else alert('Formato inválido'); }catch(e){ alert('Erro ao importar: '+(e && e.message?e.message:e)); } }; r.readAsText(f); }; inp.click(); }catch(e){ alert('Erro ao iniciar import: '+e.message); } };
-
-      $('btnClear').onclick = function(){ if(confirm('Apagar TODOS os dados locais?')){ state={categorias:[],transacoes:[]}; initDefaults(); save(); load(); } };
-
-      function setActiveChartButton(mode){
-        document.querySelectorAll('.chart-mode').forEach(b=>{
-          if(b.dataset.mode===mode){ b.classList.add('active'); } else { b.classList.remove('active'); }
-        });
-      }
-
-      Array.from(document.querySelectorAll('.chart-mode')).forEach(b=>b.addEventListener('click', (e)=>{ const mode=e.currentTarget.dataset.mode; chartMode=mode; setActiveChartButton(mode); renderChart(); }));
-
-      $('btnAdd').onclick = ()=> openModal();
-      fillMonthYear();
-      setActiveChartButton(chartMode);
-      load();
-    })();
-  }catch(e){
-    console.error('Erro na inicialização:', e);
-    alert('Erro na inicialização do app: ' + (e && e.message? e.message : e));
+    res.json({ ok: true, user: { id: user.id, email: user.email }, hasLicense: !!hasLicense });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'erro' });
   }
 });
-</script>
 
-<script>
-// === V2 Enhancements: theme toggle, toasts, animations ===
-(function(){
-  const body = document.body;
-  const THEME_KEY = 'cf_theme_v2';
-  function prefersDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
-  // init theme
-  const saved = localStorage.getItem(THEME_KEY);
-  if(saved === 'light') body.classList.remove('dark-theme');
-  if(saved === 'dark') body.classList.add('dark-theme');
-  if(!saved){ if(prefersDark()) body.classList.add('dark-theme'); else body.classList.add('light-theme'); }
-  // toggle button
-  const tBtn = document.getElementById('themeToggle');
-  if(tBtn){
-    function updateBtn(){ tBtn.textContent = body.classList.contains('light-theme') ? '🌙 Tema' : '☀️ Tema'; }
-    tBtn.addEventListener('click', ()=>{
-      if(body.classList.contains('light-theme')){ body.classList.remove('light-theme'); body.classList.add('dark-theme'); localStorage.setItem(THEME_KEY,'dark'); }
-      else { body.classList.remove('dark-theme'); body.classList.add('light-theme'); localStorage.setItem(THEME_KEY,'light'); }
-      updateBtn();
-    });
-    updateBtn();
-  }
+/* ---------- Activate license by code (associate to user email) ---------- */
+app.post('/api/activate-license', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) return res.status(400).json({ error: 'email e code necessários' });
 
-  // simple toast helper
-  window.cf_toast = function(msg, timeout=2600){
-    const el = document.createElement('div');
-    el.className = 'cf-toast';
-    el.textContent = msg;
-    document.body.appendChild(el);
-    requestAnimationFrame(()=> el.classList.add('show'));
-    setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(),300); }, timeout);
-  };
-
-  // countUp for numbers (animates numeric value)
-  window.cf_countUp = function(el, start, end, duration=700){
-    if(!el) return;
-    if(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches){ el.textContent = end.toLocaleString('pt-BR', {style:'currency', currency:'BRL'}); return; }
-    const range = end - start; const startTime = performance.now();
-    function frame(now){
-      const t = Math.min(1, (now - startTime)/duration);
-      const v = Math.round(start + range * t);
-      el.textContent = v.toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
-      if(t < 1) requestAnimationFrame(frame);
+    // find license by code
+    const { data: licData, error: errLic } = await supabase.from('licenses').select('*').eq('code', code).limit(1);
+    if (errLic) throw errLic;
+    const license = licData && licData[0];
+    if (!license) return res.status(400).json({ error: 'Licença não encontrada' });
+    if (license.status && license.status !== 'available' && license.status !== 'unused' && license.status !== 'reserved') {
+      return res.status(400).json({ error: 'Licença não disponível' });
     }
-    requestAnimationFrame(frame);
-  };
 
-  // button ripple effect (light)
-  document.addEventListener('click', function(e){
-    const btn = e.target.closest('.btn');
-    if(!btn) return;
-    const rect = btn.getBoundingClientRect();
-    const ripple = document.createElement('span');
-    const size = Math.max(rect.width, rect.height);
-    Object.assign(ripple.style, {
-      position: 'absolute', left: (e.clientX - rect.left - size/2)+'px', top: (e.clientY - rect.top - size/2)+'px',
-      width: size+'px', height: size+'px', borderRadius: '50%', background: 'rgba(255,255,255,0.12)', transform:'scale(0)', transition:'transform .45s ease, opacity .6s ease', pointerEvents:'none'
-    });
-    ripple.className = 'cf-ripple';
-    btn.style.position = btn.style.position || 'relative';
-    btn.appendChild(ripple);
-    requestAnimationFrame(()=> ripple.style.transform = 'scale(1)');
-    setTimeout(()=> { ripple.style.opacity = '0'; setTimeout(()=> ripple.remove(), 700); }, 600);
-  }, true);
+    // insert association (avoid duplicates)
+    const licenseKey = license.license_key ?? license.code;
+    const { data: existing } = await supabase.from('user_licenses').select('id').eq('user_email', email).eq('license_key', licenseKey).limit(1);
+    if (!existing || !existing.length) {
+      const { error: errIns } = await supabase.from('user_licenses').insert([{ user_email: email, license_key: licenseKey }]);
+      if (errIns) throw errIns;
+    }
 
-  // modal animation: add show class on open/close
-  const modal = document.getElementById('modal');
-  const originalOpen = window.openModal;
-  const originalClose = window.closeModal;
-  window.openModal = function(id){ if(typeof originalOpen === 'function') originalOpen(id); if(modal) modal.classList.add('show'); };
-  window.closeModal = function(){ if(typeof originalClose === 'function') originalClose(); if(modal) modal.classList.remove('show'); };
+    // update license status
+    const { error: errUpd } = await supabase.from('licenses').update({ status: 'used', used_by: email, used_at: new Date().toISOString() }).eq('code', code);
+    if (errUpd) throw errUpd;
 
-  // wrap renderSummary to add countUp animations
-  const originalRenderSummary = window.renderSummary;
-  window.renderSummary = function(){
-    try{
-      if(typeof originalRenderSummary === 'function') originalRenderSummary();
-      const r = document.getElementById('txtReceita'), d=document.getElementById('txtDespesa'), s=document.getElementById('txtSaldo'), i=document.getElementById('txtInvest');
-      try{
-        const state = JSON.parse(localStorage.getItem('controle_financeiro_v1')||'{"categorias":[],"transacoes":[]}');
-        const m = parseInt(document.getElementById('selMonth').value|| (new Date().getMonth()+1));
-        const y = parseInt(document.getElementById('selYear').value|| new Date().getFullYear());
-        let receita=0, despesa=0, invest=0;
-        (state.transacoes||[]).filter(t=>{ const d=new Date(t.data); return d.getMonth()+1===m && d.getFullYear()===y; }).forEach(t=>{ if(t.tipo==='receita') receita+=Number(t.valor||0); else if(t.tipo==='despesa') despesa+=Number(t.valor||0); else if(t.tipo==='investimento') invest+=Number(t.valor||0); });
-        window.cf_countUp(document.getElementById('txtReceita'), 0, receita, 700);
-        window.cf_countUp(document.getElementById('txtDespesa'), 0, despesa, 700);
-        window.cf_countUp(document.getElementById('txtInvest'), 0, invest, 700);
-        const saldo = receita - despesa;
-        const saldoEl = document.getElementById('txtSaldo');
-        const start = 0, end = Math.round(saldo);
-        if(saldoEl){ window.cf_countUp(saldoEl, start, end, 700); saldoEl.style.color = saldo>=0? 'rgb(36,107,255)' : 'rgb(229,57,53)'; }
-      }catch(err){ /* ignore */ }
-    }catch(e){ console.warn('renderSummary wrapper error', e); }
-  };
-
-  // wrap renderChart to add small reveal animation: fade in and slight scale
-  const originalRenderChart = window.renderChart;
-  window.renderChart = function(){
-    try{
-      const canvas = document.getElementById('chartCanvas');
-      if(canvas){ canvas.style.opacity = '0'; canvas.style.transform = 'scale(.98)'; }
-      if(typeof originalRenderChart === 'function') originalRenderChart();
-      requestAnimationFrame(()=>{ const c=document.getElementById('chartCanvas'); if(c){ c.style.transition='opacity .36s ease, transform .36s cubic-bezier(.2,.9,.2,1)'; c.style.opacity='1'; c.style.transform='scale(1)'; } });
-    }catch(e){ console.warn('renderChart wrapper error', e); if(typeof originalRenderChart==='function') originalRenderChart(); }
-  };
-
-  const btnAddCat = document.getElementById('btnAddCat');
-  const btnDelCat = document.getElementById('btnDelCat');
-  if(btnAddCat){ btnAddCat.addEventListener('click', ()=> setTimeout(()=> window.cf_toast('Categoria criada'), 400)); }
-  if(btnDelCat){ btnDelCat.addEventListener('click', ()=> setTimeout(()=> window.cf_toast('Categoria excluída'), 400)); }
-
-  setTimeout(()=>{ try{ window.renderSummary && window.renderSummary(); window.renderChart && window.renderChart(); }catch(e){} }, 400);
-
-})();
-</script>
-
-<!-- CF-BUTTON-FIX-START -->
-<script>
-/* Minimal non-invasive button fix: reattach Add and Edit handlers without touching other scripts or animations.
-   Idempotent: will not re-add if already installed. */
-(function(){
-  if(window.__cf_button_fix_installed) return;
-  window.__cf_button_fix_installed = true;
-
-  function openFallback(id){
-    try{
-      if(window.openModal && typeof window.openModal === 'function'){ window.openModal(id); return; }
-      if(typeof openModal === 'function'){ openModal(id); return; }
-      const modal = document.getElementById('modal');
-      if(!modal) return;
-      modal.style.display = 'flex';
-      const titleEl = document.getElementById('modalTitle');
-      if(titleEl) titleEl.textContent = id ? 'Editar transação' : 'Adicionar transação';
-      if(id){
-        try{
-          const state = JSON.parse(localStorage.getItem('controle_financeiro_v1')||'{"categorias":[],"transacoes":[]}');
-          const rec = (state.transacoes||[]).find(t=>t.id===id);
-          if(rec){
-            try{ document.getElementById('mTipo').value = rec.tipo || 'despesa'; }catch(e){}
-            try{ document.getElementById('mCat').value = rec.categoria_id || ''; }catch(e){}
-            try{ document.getElementById('mValor').value = rec.valor; }catch(e){}
-            try{ document.getElementById('mData').value = rec.data || new Date().toISOString().slice(0,10); }catch(e){}
-            try{ document.getElementById('mDesc').value = rec.descricao || ''; }catch(e){}
-            window._cf_forced_editingId = id;
-          }
-        }catch(e){ console.warn('CF button fix: error populating modal', e); }
-      } else {
-        try{ document.getElementById('mTipo').value = 'despesa'; }catch(e){}
-        try{
-          const cats = (JSON.parse(localStorage.getItem('controle_financeiro_v1')||'{"categorias":[]}').categorias||[]);
-          if(cats && cats[0]) document.getElementById('mCat').value = cats[0].id;
-        }catch(e){}
-        try{ document.getElementById('mValor').value = ''; }catch(e){};
-        try{ document.getElementById('mData').value = new Date().toISOString().slice(0,10); }catch(e){};
-        try{ document.getElementById('mDesc').value = ''; }catch(e){};
-      }
-    }catch(e){ console.error('CF button fix openFallback error', e); }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'erro' });
   }
+});
 
-  function attachAdd(){
-    const btn = document.getElementById('btnAdd');
-    if(!btn) return;
-    try{ btn.removeEventListener('click', window.__cf_add_handler); }catch(e){}
-    window.__cf_add_handler = function(ev){ ev && ev.preventDefault && ev.preventDefault(); openFallback(); };
-    btn.addEventListener('click', window.__cf_add_handler);
-  }
+/* ---------- Create Stripe Checkout Session ---------- */
+app.post('/api/create-checkout-session', async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+    const { priceId, customerEmail } = req.body;
+    if (!priceId) return res.status(400).json({ error: 'priceId required' });
 
-  function attachEditDelegation(){
-    try{ document.removeEventListener('click', window.__cf_edit_delegation, true); }catch(e){}
-    window.__cf_edit_delegation = function(ev){
-      const el = ev.target && ev.target.closest && ev.target.closest('.edit-btn');
-      if(!el) return;
-      ev.preventDefault();
-      const id = el.dataset && el.dataset.id;
-      openFallback(id);
+    // create a license record in DB as reserved so we have a code to attach
+    const code = genLicenseCode();
+    const licensePayload = { code, license_key: code, status: 'reserved', created_at: new Date().toISOString() };
+    const { data: licInsert, error: errLic } = await supabase.from('licenses').insert([licensePayload]).select();
+    if (errLic) throw errLic;
+    const license = licInsert && licInsert[0];
+
+    const sessionPayload = {
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: (FRONTEND_URL || 'https://your-frontend.com') + '/auth.html?success=1',
+      cancel_url: (FRONTEND_URL || 'https://your-frontend.com') + '/auth.html?cancel=1',
+      // include the license code and optionally the customer email as metadata
+      metadata: { license_code: license.code }
     };
-    document.addEventListener('click', window.__cf_edit_delegation, true);
-  }
+    if (customerEmail) sessionPayload.customer_email = customerEmail;
 
-  function attachSaveShim(){
-    const btnSave = document.getElementById('btnSave');
-    if(!btnSave) return;
-    if(btnSave.__cf_wrapped) return;
-    btnSave.__cf_wrapped = true;
-    btnSave.addEventListener('click', function(){
-      if(window._cf_forced_editingId){
-        try{ window.editingId = window._cf_forced_editingId; }catch(e){};
+    const session = await stripe.checkout.sessions.create(sessionPayload);
+
+    res.json({ ok: true, url: session.url });
+  } catch (err) {
+    console.error('create-checkout-session error', err);
+    res.status(500).json({ error: err.message || 'erro' });
+  }
+});
+
+/* ---------- Stripe webhook to finalize purchase ---------- */
+// raw body middleware for webhook verification
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).send('Stripe not configured');
+    const sig = req.headers['stripe-signature'];
+    let event;
+    try {
+      if (STRIPE_WEBHOOK_SECRET) {
+        event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+      } else {
+        // unsafe fallback (if webhook secret not set) - try to parse
+        event = JSON.parse(req.body.toString());
       }
-    }, {capture:true});
-  }
+    } catch (err) {
+      console.error('Webhook signature verification failed.', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
 
-  function init(){
-    attachAdd();
-    attachEditDelegation();
-    attachSaveShim();
-    try{
-      const tbody = document.querySelector('#tblTrans tbody');
-      if(tbody && !tbody.__cf_observer_installed){
-        const mo = new MutationObserver(function(){ attachAdd(); attachEditDelegation(); attachSaveShim(); });
-        mo.observe(tbody, { childList: true, subtree: true });
-        tbody.__cf_observer_installed = true;
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const license_code = session.metadata && session.metadata.license_code;
+      const customer_email = session.customer_email || session.customer || null;
+
+      if (license_code) {
+        // mark license used and attach to user if exists
+        // find license record
+        const { data: lic } = await supabase.from('licenses').select('*').eq('code', license_code).limit(1);
+        const license = lic && lic[0];
+        if (license) {
+          // update license status
+          await supabase.from('licenses').update({ status: 'used', used_by: customer_email || null, used_at: new Date().toISOString() }).eq('code', license_code);
+
+          // if there's a user with this email, associate it
+          if (customer_email) {
+            const { data: u } = await supabase.from('users').select('*').eq('email', customer_email).limit(1);
+            const user = u && u[0];
+            const licenseKey = license.license_key ?? license.code;
+            if (user) {
+              // insert into user_licenses
+              await supabase.from('user_licenses').insert([{ user_email: customer_email, license_key: licenseKey }]);
+            } else {
+              // no user yet - keep used_by as email so later activation can link
+            }
+          }
+        }
       }
-    }catch(e){}
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error('webhook handler error', err);
+    res.status(500).send('Webhook processing error');
   }
+});
 
-  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
+/* ---------- Utility endpoints for debug (optional) ---------- */
+app.get('/api/licenses', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('licenses').select('*').order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    res.json({ ok: true, licenses: data });
+  } catch (err) { console.error(err); res.status(500).json({ error: err.message }); }
+});
 
-  setTimeout(init, 300);
-  console.log('CF button fix installed (non-invasive)');
-})();
-</script>
-<!-- CF-BUTTON-FIX-END -->
-
-</body>
-</html>
+/* ---------- Start ---------- */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server rodando na porta ${PORT}`));
