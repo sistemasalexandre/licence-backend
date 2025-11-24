@@ -1,63 +1,43 @@
-// server/index.js — Arquivo completo, pronto para uso
-
+// server/index.js
+// Entry point for Express server (production-ready adjustments for Render/Cloudflare Pages)
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const app = express();
 const routes = require('./routes');
 
-const app = express();
-
-// --------------------- ENV CONFIG -----------------------
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://vidacomgrana.pages.dev';
+const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vidacomgrana.pages.dev';
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || null;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || null;
 
-console.log("===========================================");
-console.log("Backend de licenças rodando na porta 10000");
-console.log("ALLOWED_ORIGIN:", ALLOWED_ORIGIN);
-console.log("FRONTEND_URL:", FRONTEND_URL);
-console.log("Stripe ativo?:", STRIPE_SECRET_KEY ? "SIM" : "NÃO");
-console.log("Webhook secret definido?:", STRIPE_WEBHOOK_SECRET ? "true" : "false");
-console.log("SendGrid key definida?:", process.env.SENDGRID_API_KEY ? "true" : "false");
-console.log("===========================================");
+// Trust proxy when behind a reverse proxy (Render, Cloudflare)
+app.set('trust proxy', 1);
 
-// ----------------- Inicializar Stripe -------------------
-let stripe = null;
-if (STRIPE_SECRET_KEY) {
-  try {
-    stripe = require("stripe")(STRIPE_SECRET_KEY);
-    console.log("[INIT] Stripe inicializado.");
-  } catch (err) {
-    console.error("Falha ao inicializar Stripe:", err);
-  }
-}
-app.locals.stripe = stripe;
-app.locals.STRIPE_WEBHOOK_SECRET = STRIPE_WEBHOOK_SECRET;
+// IMPORTANT: keep express.json off for the Stripe webhook route so we can use express.raw there.
+// We apply JSON body parsing for all routes except the exact webhook path.
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/stripe-webhook') return next();
+  express.json()(req, res, next);
+});
+app.use(express.urlencoded({ extended: true }));
 
-// ================= RAW BODY PARA WEBHOOK =================
-app.use(
-  express.json({
-    verify: (req, res, buf) => {
-      if (req.originalUrl.includes("/api/stripe-webhook")) {
-        req.rawBody = buf.toString();
-      }
-    },
-  })
-);
+// Configure CORS: allow only the frontend URL (change if needed)
+app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 
-// ------------------------ CORS --------------------------
-app.use(
-  cors({
-    origin: ALLOWED_ORIGIN,
-    credentials: true,
-  })
-);
+// health check
+app.get('/', (req, res) => res.send('API is running'));
 
-// ------------------------ ROTAS --------------------------
+// mount API routes under /api
 app.use('/api', routes);
 
-// ------------------------ SERVIDOR ------------------------
-const PORT = process.env.PORT || 10000;
+// 404 handler
+app.use((req, res) => res.status(404).json({ error: 'not_found' }));
+
+// error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'internal_server_error' });
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor iniciado na porta ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });

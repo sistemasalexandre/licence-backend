@@ -1,227 +1,202 @@
-// server/routes.js — com rota de teste para webhooks + Stripe + licenças + SendGrid
-
+// server/routes.js
+// API routes: /register, /login, /redeem, /stripe-webhook
 const express = require('express');
-const crypto = require('crypto');
-const pool = require('./db');
-const { z } = require('zod');
-const bcrypt = require('bcrypt');
-const sgMail = require('@sendgrid/mail');
-
 const router = express.Router();
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { pool } = require('./db');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || ''); // set STRIPE_SECRET_KEY env
+// Config
+const JWT_SECRET = process.env.JWT_SECRET || 'troque_isto_em_producao';
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 
-// ----------------- SendGrid -----------------
-if (process.env.SENDGRID_API_KEY) {
-  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-  console.log('[SENDGRID] API key configurada.');
-} else {
-  console.log('[SENDGRID] SENDGRID_API_KEY não definida. E-mails serão ignorados.');
+// helper to create JWT
+function createJwt(user) {
+  const payload = { userId: user.id, email: user.email };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 
-async function sendLicenseEmail(toEmail, licenseKey) {
-  if (!process.env.SENDGRID_API_KEY) {
-    console.log('[SENDGRID] Não configurado, pulando envio de email.');
-    return;
-  }
-  if (!process.env.EMAIL_FROM) {
-    console.log('[SENDGRID] EMAIL_FROM não definido. Não é possível enviar email.');
-    return;
-  }
-
-  const msg = {
-    to: toEmail,
-    from: process.env.EMAIL_FROM,
-    subject: 'Sua licença VidaComGrana',
-    html: `<p>Obrigado pela compra!</p>
-           <p>Sua licença é:</p>
-           <p><b>${licenseKey}</b></p>
-           <p>Use-a na página de ativação / registro do app.</p>`
-  };
-
+// --------------- Register ---------------
+router.post('/register', async (req, res) => {
   try {
-    await sgMail.send(msg);
-    console.log('[SENDGRID] Email enviado para', toEmail);
-  } catch (err) {
-    console.error('[SENDGRID] Erro no envio do email:', err);
-    if (err.response && err.response.body) console.error('[SENDGRID] Detalhes:', err.response.body);
-  }
-}
+    const { email, password, licenseCode } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
+    if (String(password).length < 8) return res.status(400).json({ error: 'password_too_short' });
 
-// ===================== ROTA DE TESTE (adicionar/remover quando quiser) =====================
-router.post('/test-webhook', async (req, res) => {
-  console.log('[TEST-WEBHOOK] Chegou requisição:', {
-    headers: req.headers,
-    body: req.body,
-    time: new Date().toISOString()
-  });
-  res.json({ ok: true, msg: 'test webhook recebido' });
-});
-// ===========================================================================================
+    const client = await pool.connect();
+    try {
+      const exists = await client.query('SELECT id FROM users WHERE email = $1 LIMIT 1', [email.toLowerCase()]);
+      if (exists.rows.length) return res.status(409).json({ error: 'email_exists' });
 
-// ===================== STRIPE - criar sessão de checkout =====================
-router.post('/create-checkout-session', async (req, res) => {
-  const stripe = req.app.locals.stripe;
-  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://vidacomgrana.pages.dev';
+      const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      const insert = await client.query(
+        'INSERT INTO users (email, password_hash, created_at) VALUES ($1, $2, now()) RETURNING id, email',
+        [email.toLowerCase(), hash]
+      );
+      const user = insert.rows[0];
 
-  if (!stripe) {
-    console.error('[STRIPE] Stripe não configurado.');
-    return res.status(500).json({ error: 'Stripe não configurado no servidor' });
-  }
+      // If licenseCode provided, try to associate
+      if (licenseCode) {
+        const licQ = await client.query(
+          `SELECT id, code, license_key, status FROM licenses WHERE code = $1 OR license_key = $1 LIMIT 1`,
+          [licenseCode]
+        );
+        if (licQ.rows.length) {
+          const lic = licQ.rows[0];
+          if (lic.status === 'available' || lic.status === 'sold') {
+            await client.query('BEGIN');
+            await client.query(`UPDATE licenses SET user_id=$1, status='redeemed', sold_at=now() WHERE id=$2`, [user.id, lic.id]);
+            try {
+              await client.query(`INSERT INTO user_licenses (user_id, license_id, activated_at, created_at) VALUES ($1,$2,now(),now()) ON CONFLICT DO NOTHING`, [user.id, lic.id]);
+            } catch (e) { /* ignore if table missing */ }
+            await client.query('COMMIT');
+          }
+        }
+      }
 
-  const { priceId, customerEmail } = req.body;
-  if (!priceId || !customerEmail) return res.status(400).json({ error: 'priceId e customerEmail são obrigatórios' });
-
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      payment_method_types: ['card'],
-      line_items: [{ price: priceId, quantity: 1 }],
-      customer_email: customerEmail,
-      success_url: `${FRONTEND_URL}/auth?checkout=success`,
-      cancel_url: `${FRONTEND_URL}/auth?checkout=cancel`,
-      metadata: { customerEmail }
-    });
-
-    console.log('[STRIPE] Checkout session criada:', session.id);
-    res.json({ ok: true, url: session.url });
-  } catch (err) {
-    console.error('[STRIPE] Erro ao criar checkout session:', err);
-    res.status(500).json({ error: 'erro ao criar sessão de checkout' });
+      const token = createJwt(user);
+      return res.json({ ok: true, token });
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error('register error', e);
+    return res.status(500).json({ error: 'server_error', detail: e.message });
   }
 });
 
-// ===================== STRIPE - webhook (válido) =====================
-router.post('/stripe-webhook', async (req, res) => {
-  const stripe = req.app.locals.stripe;
-  const webhookSecret = req.app.locals.STRIPE_WEBHOOK_SECRET;
+// --------------- Login ---------------
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
 
-  if (!stripe || !webhookSecret) {
-    console.error('[STRIPE] Webhook sem configuração (stripe ou secret ausente).');
-    return res.status(500).send('Webhook não configurado');
+    const client = await pool.connect();
+    try {
+      const q = await client.query('SELECT id, email, password_hash FROM users WHERE email = $1 LIMIT 1', [email.toLowerCase()]);
+      if (!q.rows.length) return res.status(404).json({ error: 'user_not_found' });
+      const user = q.rows[0];
+      const ok = await bcrypt.compare(password, user.password_hash);
+      if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
+      const token = createJwt(user);
+      return res.json({ ok: true, token });
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error('login error', e);
+    return res.status(500).json({ error: 'server_error', detail: e.message });
   }
+});
 
+// --------------- Redeem (ativar licença) ---------------
+router.post('/redeem', async (req, res) => {
+  try {
+    const { email, code } = req.body || {};
+    if (!email || !code) return res.status(400).json({ error: 'email_and_code_required' });
+
+    const client = await pool.connect();
+    try {
+      // Try license lookup by common column names
+      let licQ = await client.query(`SELECT id, code, license_key, status, user_id FROM licenses WHERE license_key = $1 LIMIT 1`, [code]);
+      if (!licQ.rows.length) {
+        licQ = await client.query(`SELECT id, code, license_key, status, user_id FROM licenses WHERE code = $1 LIMIT 1`, [code]);
+      }
+      if (!licQ.rows.length) return res.status(404).json({ error: 'license_not_found' });
+
+      const lic = licQ.rows[0];
+      if (lic.user_id && (lic.status === 'redeemed' || lic.status === 'used')) {
+        return res.status(400).json({ error: 'license_already_redeemed' });
+      }
+
+      // find or create user
+      let userRes = await client.query('SELECT id FROM users WHERE email = $1 LIMIT 1', [email.toLowerCase()]);
+      let userId;
+      if (userRes.rows.length) {
+        userId = userRes.rows[0].id;
+      } else {
+        const ins = await client.query('INSERT INTO users (email, created_at) VALUES ($1, now()) RETURNING id', [email.toLowerCase()]);
+        userId = ins.rows[0].id;
+      }
+
+      // associate and update status inside transaction
+      await client.query('BEGIN');
+      await client.query('UPDATE licenses SET user_id=$1, status=$2, sold_at=now() WHERE id=$3', [userId, 'redeemed', lic.id]);
+      try {
+        await client.query('INSERT INTO user_licenses (user_id, license_id, activated_at, created_at) VALUES ($1,$2,now(),now()) ON CONFLICT DO NOTHING', [userId, lic.id]);
+      } catch (e) {
+        console.warn('user_licenses insert skipped:', e.message || e);
+      }
+      await client.query('COMMIT');
+
+      return res.json({ ok: true, message: 'Licença ativada', license: lic.code || lic.license_key });
+    } catch (e) {
+      await client.query('ROLLBACK').catch(()=>{});
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error('redeem error', e);
+    return res.status(500).json({ error: 'server_error', detail: e.message });
+  }
+});
+
+// --------------- Stripe webhook ---------------
+// This route expects the raw body (see server/index.js which skips JSON parsing for this path)
+router.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error('Stripe webhook secret not configured');
+    return res.status(500).send('Webhook secret not configured');
+  }
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret);
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
   } catch (err) {
-    console.error('[STRIPE] Erro ao validar webhook:', err.message);
+    console.error('Webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  console.log('[STRIPE] EVENTO:', event.type);
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const customerEmail = session.customer_details?.email || session.customer_email || (session.customer && session.customer.email);
+      const priceId = session.metadata?.priceId || (session.display_items && session.display_items[0]?.price?.id);
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const email =
-      (session.customer_details && session.customer_details.email) ||
-      (session.metadata && session.metadata.customerEmail);
-
-    console.log('[STRIPE] Criando licença para:', email);
-    if (email) {
+      // create a license code and insert into DB
+      const code = 'LIC-' + Math.random().toString(36).slice(2,9).toUpperCase();
+      const client = await pool.connect();
       try {
-        const licenseKey = crypto.randomBytes(16).toString('hex');
-        await pool.query(
-          `INSERT INTO licenses (user_id, license_key, used, created_at) VALUES (NULL, $1, false, now())`,
-          [licenseKey]
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO licenses (code, price_id, status, metadata, sold_at) VALUES ($1,$2,'sold',$3, now())`,
+          [code, priceId || null, JSON.stringify({ stripe_session: session.id, customer_email: customerEmail })]
         );
-        await sendLicenseEmail(email, licenseKey);
-        console.log('[STRIPE] Licença salva e email enviado:', licenseKey);
-      } catch (err) {
-        console.error('[STRIPE] Erro ao gerar/salvar licença:', err);
+        // if user exists, associate
+        if (customerEmail) {
+          const u = await client.query('SELECT id FROM users WHERE email = $1 LIMIT 1', [customerEmail.toLowerCase()]);
+          if (u.rows.length) {
+            const lic = await client.query('SELECT id FROM licenses WHERE code = $1 LIMIT 1', [code]);
+            await client.query('INSERT INTO user_licenses (user_id, license_id, activated_at, created_at) VALUES ($1,$2,now(),now())', [u.rows[0].id, lic.rows[0].id]);
+            await client.query('UPDATE licenses SET status = $1 WHERE id = $2', ['redeemed', lic.rows[0].id]);
+          }
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(()=>{});
+        console.error('Error processing checkout session:', e);
+      } finally {
+        client.release();
       }
-    } else {
-      console.error('[STRIPE] checkout.session.completed sem email');
     }
-  }
-
-  res.json({ received: true });
-});
-
-// ===================== TEST - criar licença manual =====================
-router.post('/test-create-license', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'email obrigatório' });
-
-  try {
-    const licenseKey = crypto.randomBytes(16).toString('hex');
-    await pool.query(
-      `INSERT INTO licenses (user_id, license_key, used, created_at) VALUES (NULL, $1, false, now())`,
-      [licenseKey]
-    );
-    await sendLicenseEmail(email, licenseKey);
-    res.json({ ok: true, licenseKey });
-  } catch (err) {
-    console.error('test-create-license error:', err);
-    res.status(500).json({ error: 'erro ao criar licença' });
+    // respond to Stripe
+    res.json({ received: true });
+  } catch (e) {
+    console.error('Webhook processing error', e);
+    res.status(500).send();
   }
 });
 
-// ===================== REGISTER / LOGIN / VERIFY =====================
-router.post('/register', async (req, res) => {
-  const schema = z.object({ email: z.string().email(), password: z.string().min(6), licenseKey: z.string().min(8) });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.errors });
-
-  const { email, password, licenseKey } = parsed.data;
-  try {
-    const licRes = await pool.query(`SELECT * FROM licenses WHERE license_key = $1 AND user_id IS NULL LIMIT 1`, [licenseKey]);
-    if (!licRes.rows.length) return res.status(400).json({ error: 'Licença inválida ou já usada' });
-
-    const hashed = await bcrypt.hash(password, 10);
-    const userInsert = await pool.query(
-      `INSERT INTO users (email, password_hash, name, created_at) VALUES ($1, $2, '', now()) RETURNING id`,
-      [email, hashed]
-    );
-    const userId = userInsert.rows[0].id;
-    await pool.query(`UPDATE licenses SET user_id = $1, used = true WHERE license_key = $2`, [userId, licenseKey]);
-    res.json({ ok: true, message: 'Usuário criado e licença ativada' });
-  } catch (err) {
-    console.error('register error:', err);
-    res.status(500).json({ error: 'erro no servidor' });
-  }
-});
-
-router.post('/login', async (req, res) => {
-  const schema = z.object({ email: z.string().email(), password: z.string().min(1) });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.errors });
-
-  const { email, password } = parsed.data;
-  try {
-    const userRes = await pool.query(`SELECT id, password_hash FROM users WHERE email = $1 LIMIT 1`, [email]);
-    if (!userRes.rows.length) return res.status(401).json({ error: 'Credenciais inválidas' });
-
-    const user = userRes.rows[0];
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'Credenciais inválidas' });
-
-    const licRes = await pool.query(`SELECT license_key FROM licenses WHERE user_id = $1 LIMIT 1`, [user.id]);
-    res.json({ ok: true, userId: user.id, license: licRes.rows[0] || null });
-  } catch (err) {
-    console.error('login error:', err);
-    res.status(500).json({ error: 'erro servidor' });
-  }
-});
-
-router.post('/verify-license', async (req, res) => {
-  const { license, email } = req.body;
-  if (!license) return res.status(400).json({ valid: false, error: 'licença vazia' });
-
-  try {
-    const licRes = await pool.query(`SELECT * FROM licenses WHERE license_key = $1`, [license]);
-    if (!licRes.rows.length) return res.json({ valid: false });
-
-    const lic = licRes.rows[0];
-    if (email && lic.user_id) {
-      const user = await pool.query(`SELECT email FROM users WHERE id = $1`, [lic.user_id]);
-      if (user.rows.length && user.rows[0].email !== email) return res.json({ valid: false });
-    }
-    return res.json({ valid: true });
-  } catch (err) {
-    console.error('verify-license error', err);
-    return res.status(500).json({ error: 'erro servidor' });
-  }
-});
-
-// ---------------- Exporta router ----------------
 module.exports = router;
