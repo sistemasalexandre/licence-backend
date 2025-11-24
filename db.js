@@ -19,5 +19,5 @@ pool.on('error', (err) => {
   process.exit(-1);
 });
 
-// Exporta um objeto com a chave `pool` (routes.js usa const { pool } = require('./db'))
+// Exporta como { pool } porque routes.js faz: const { pool } = require('./db')
 module.exports = { pool };
