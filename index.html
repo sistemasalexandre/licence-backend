@@ -12,12 +12,20 @@
   .btn.secondary{background:#6c757d}
   .btn.danger{background:#e53935}
   .input, select{width:100%;padding:8px;margin:6px 0;border-radius:8px;border:1px solid #e6e9ee}
-  .modal{position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.45);display:none;align-items:center;justify-content:center}
+  .modal{position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.45);display:none;align-items:center;justify-content:center;z-index:10001}
   .dialog{background:#fff;padding:16px;border-radius:10px;width:520px;max-width:96%}
   #chartTooltip{position:fixed;pointer-events:none;background:rgba(0,0,0,0.85);color:#fff;padding:8px 10px;border-radius:6px;font-size:0.95rem;display:none;z-index:9999}
   footer{position:fixed;left:0;right:0;bottom:0;height:48px;background:#ffffffcc;display:flex;align-items:center;justify-content:center;border-top:1px solid #eee;font-size:0.95rem}
   .chart-mode{background:#246bff;border-radius:8px;color:#fff;padding:8px 12px;border:none;font-weight:600;cursor:pointer}
   .chart-mode.active{background:#e53935;color:#fff}
+
+  /* demo overlay */
+  #demoLockOverlay{
+    position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.75);display:none;align-items:center;justify-content:center;z-index:100000;
+    color:#fff;padding:20px;text-align:center;font-size:1.1rem;
+  }
+  #demoLockOverlay .box{background:linear-gradient(90deg,#5b8def,#2bbbad);padding:22px;border-radius:12px;max-width:720px}
+  .cf-disabled { opacity: 0.5; pointer-events: none; }
 </style>
 
 <style>
@@ -77,6 +85,82 @@ body.dark-theme .modal{ background: rgba(5,8,15,0.65) !important; }
 </style>
 </head>
 <body>
+
+<!-- ================= ACCESS PROTECTION (top) ================= -->
+<script>
+/*
+  Proteção de acesso:
+  - se não houver cf_auth_token -> auth.html
+  - se token expirado -> auth.html
+  - se email === 'demo@local' -> index_modified_for_demo.html
+  - se usuário não ativado (cf_auth_v1[email].activated !== true) -> index_modified_for_demo.html
+*/
+(function(){
+  try{
+    const path = window.location.pathname || '';
+    // allow direct local dev on localhost
+    const allowLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const tokenRaw = localStorage.getItem('cf_auth_token');
+    if(!allowLocal){
+      if(!tokenRaw){
+        window.location.replace('auth.html');
+        return;
+      }
+    }
+    let token = null;
+    try {
+      token = tokenRaw ? JSON.parse(tokenRaw) : null;
+    } catch(e) {
+      localStorage.removeItem('cf_auth_token');
+      window.location.replace('auth.html');
+      return;
+    }
+    if(!token){
+      window.location.replace('auth.html'); return;
+    }
+    if(token.expires && Date.now() > token.expires){
+      localStorage.removeItem('cf_auth_token');
+      window.location.replace('auth.html'); return;
+    }
+    const email = token.email;
+    if(!email){
+      localStorage.removeItem('cf_auth_token');
+      window.location.replace('auth.html'); return;
+    }
+    if(email === 'demo@local'){
+      // demo users redirected to demo page
+      if(!path.endsWith('index_modified_for_demo.html')) window.location.replace('index_modified_for_demo.html');
+      return;
+    }
+    // check local activation flag
+    try{
+      const users = JSON.parse(localStorage.getItem('cf_auth_v1') || '{}');
+      const rec = users[email];
+      if(!rec || !rec.activated){
+        if(!path.endsWith('index_modified_for_demo.html')) window.location.replace('index_modified_for_demo.html');
+        return;
+      }
+    }catch(e){
+      window.location.replace('auth.html'); return;
+    }
+    // otherwise allowed to proceed
+  }catch(e){
+    try{ console.error('Proteção: ', e); }catch(_){} 
+    try{ window.location.replace('auth.html'); }catch(_){} 
+  }
+})();
+</script>
+<!-- ================= END ACCESS PROTECTION ================= -->
+
+<!-- DEMO LOCK OVERLAY -->
+<div id="demoLockOverlay" role="dialog" aria-hidden="true">
+  <div class="box">
+    <h2>Versão de Demonstração — Limite Atingido</h2>
+    <p>Você atingiu o limite da versão de demonstração. Para continuar usando o aplicativo compre uma licença e ative-a no login.</p>
+    <p><a href="auth.html" style="color:#fff;text-decoration:underline;font-weight:700">Voltar para ativação / compra</a></p>
+  </div>
+</div>
+
 <div class="container">
   <div class="topbar card" style="display:flex;align-items:center;justify-content:space-between">
     <h2 style="margin:0">Controle Financeiro</h2>
@@ -185,10 +269,59 @@ body.dark-theme .modal{ background: rgba(5,8,15,0.65) !important; }
 <footer>Controle Financeiro V1 - Desenvolvido por Alexandre Mateus</footer>
 
 <script>
+// DEMO helpers (global) - uses localStorage key: cf_demo_usage_v1
+(function(){
+  const DEMO_KEY = 'cf_demo_usage_v1';
+  const DEMO_LIMITS = { transactions: 5, categories_create: 5, categories_delete: 5 };
+
+  function isDemoUser(){ try{ const t = JSON.parse(localStorage.getItem('cf_auth_token')||'null'); return t && t.email === 'demo@local'; }catch(e){ return false; } }
+  function demoLoad(){ try{ return JSON.parse(localStorage.getItem(DEMO_KEY) || '{}'); }catch(e){ return {}; } }
+  function demoSave(obj){ localStorage.setItem(DEMO_KEY, JSON.stringify(obj)); }
+  function demoCount(type){ const s = Object.assign({transactions:0,categories_create:0,categories_delete:0}, demoLoad()); return s[type]||0; }
+
+  function demoLockUI(){
+    try{
+      const ov = document.getElementById('demoLockOverlay');
+      if(ov) ov.style.display = 'flex';
+      Array.from(document.querySelectorAll('button,input,select,textarea')).forEach(el=>{
+        // keep auth link and anchors enabled; disable interactive controls
+        if(el.tagName && el.tagName.toLowerCase() === 'a') return;
+        el.disabled = true;
+        el.classList && el.classList.add('cf-disabled');
+      });
+      const modal = document.getElementById('modal'); if(modal) modal.style.display='none';
+    }catch(e){ console.error('demoLockUI', e); }
+  }
+
+  function demoIncrement(type){
+    if(!isDemoUser()) return;
+    const s = Object.assign({transactions:0,categories_create:0,categories_delete:0}, demoLoad());
+    s[type] = (s[type]||0) + 1;
+    demoSave(s);
+    if(s[type] >= (DEMO_LIMITS[type] || 0)) demoLockUI();
+  }
+
+  function demoLocked(type){ return demoCount(type) >= (DEMO_LIMITS[type] || 0); }
+
+  // expose
+  window.demoIncrement = demoIncrement;
+  window.demoLocked = demoLocked;
+  window.isDemoUser = isDemoUser;
+  window.demoLoad = demoLoad;
+  window.demoSave = demoSave;
+
+  // on load, apply lock if needed (some parts of UI are created after DOMContentLoaded, will also check later)
+  document.addEventListener('DOMContentLoaded', function(){
+    try{
+      if(isDemoUser() && demoLocked('transactions')) demoLockUI();
+    }catch(e){}
+  });
+})();
+</script>
+
+<script>
 // Patch: initialize on DOMContentLoaded and catch runtime errors to surface them to the user.
-// This helps diagnose why "buttons stopped working".
 window.addEventListener('error', function(e){
-  // show a simple alert for any uncaught errors (helps debugging)
   try{ alert('Erro detectado: ' + (e && e.message ? e.message : e)); }catch(_){}
 });
 
@@ -207,7 +340,16 @@ document.addEventListener('DOMContentLoaded', function(){
       function $(id){ return document.getElementById(id); }
       function currency(v){ return 'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2}); }
 
-      function load(){ try{ const txt=localStorage.getItem(KEY); if(txt) state=JSON.parse(txt); if(!state.categorias || state.categorias.length===0) initDefaults(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); setActiveChartButton(chartMode); }catch(e){ console.error(e); state={categorias:[],transacoes:[]}; initDefaults(); } }
+      function load(){ try{ const txt=localStorage.getItem(KEY); if(txt) state=JSON.parse(txt); if(!state.categorias || state.categorias.length===0) initDefaults(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); setActiveChartButton(chartMode); // demo: if demo user and locked -> block UI
+          if(window.isDemoUser && window.isDemoUser() && window.demoLocked && window.demoLocked('transactions')) {
+            const ov = document.getElementById('demoLockOverlay');
+            if(ov) ov.style.display='flex';
+            Array.from(document.querySelectorAll('button,input,select,textarea')).forEach(el=>{
+              if(el.tagName && el.tagName.toLowerCase()==='a') return;
+              el.disabled = true; el.classList && el.classList.add('cf-disabled');
+            });
+          }
+        }catch(e){ console.error(e); state={categorias:[],transacoes:[]}; initDefaults(); } }
       function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
 
       function initDefaults(){ const defs=[ ['Alimentação','despesa'],['Luz','despesa'],['Condomínio','despesa'],['Cartão de Crédito','despesa'],['Viagem','despesa'], ['Caixinha','investimento'],['Ações','investimento'],['Tesouro Direto','investimento'],['Fundos Imobiliários','investimento'], ['Salário','receita'],['Dividendos','receita'],['Outros','receita'] ]; state.categorias = defs.map((d,i)=>({id:'cat_'+i,nome:d[0],tipo:d[1]})); state.transacoes = state.transacoes || []; save(); }
@@ -215,10 +357,35 @@ document.addEventListener('DOMContentLoaded', function(){
       function renderCats(){ const sel=$('mCat'); if(!sel) return; sel.innerHTML=''; state.categorias.forEach(c=>{ const o=document.createElement('option'); o.value=c.id; o.text=c.nome; sel.appendChild(o); }); }
       function renderExistingCats(){ const sel=$('existingCats'); if(!sel) return; sel.innerHTML=''; state.categorias.forEach(c=>{ const o=document.createElement('option'); o.value=c.id; o.text=c.nome + ' ('+c.tipo+')'; sel.appendChild(o); }); }
 
-      $('btnAddCat').onclick = function(){ const name = $('newCatName').value.trim(); const tipo = $('newCatType').value; if(!name){ alert('Digite o nome da categoria'); return; } const id = 'cat_'+Date.now(); state.categorias.push({id,nome:name,tipo:tipo}); save(); renderCats(); renderExistingCats(); $('newCatName').value=''; alert('Categoria criada: ' + name); };
+      // CREATE CATEGORY: increment demo counter if demo user
+      $('btnAddCat').onclick = function(){
+        const name = $('newCatName').value.trim();
+        const tipo = $('newCatType').value;
+        if(!name){ alert('Digite o nome da categoria'); return; }
+        const id = 'cat_'+Date.now();
+        state.categorias.push({id,nome:name,tipo:tipo});
+        save(); renderCats(); renderExistingCats(); $('newCatName').value='';
+        alert('Categoria criada: ' + name);
+        try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('categories_create'); }catch(e){}
+      };
 
       // delete category
-      $('btnDelCat').onclick = function(){ const sel = $('existingCats'); if(!sel){ alert('Nenhuma categoria disponível'); return; } const id = sel.value; if(!id){ alert('Selecione uma categoria para excluir'); return; } const cat = state.categorias.find(c=>c.id===id); if(!cat){ alert('Categoria não encontrada'); return; } const related = state.transacoes.filter(t=>t.categoria_id===id); if(related.length>0){ if(!confirm('Essa categoria tem '+related.length+' transações. Ao excluir, essas transações ficarão sem categoria. Confirma excluir?')) return; state.transacoes = state.transacoes.map(t=> t.categoria_id===id ? Object.assign({},t,{categoria_id: null}) : t); } state.categorias = state.categorias.filter(c=>c.id!==id); save(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); alert('Categoria excluída'); };
+      $('btnDelCat').onclick = function(){
+        const sel = $('existingCats');
+        if(!sel){ alert('Nenhuma categoria disponível'); return; }
+        const id = sel.value;
+        if(!id){ alert('Selecione uma categoria para excluir'); return; }
+        const cat = state.categorias.find(c=>c.id===id);
+        if(!cat){ alert('Categoria não encontrada'); return; }
+        const related = state.transacoes.filter(t=>t.categoria_id===id);
+        if(related.length>0){
+          if(!confirm('Essa categoria tem '+related.length+' transações. Ao excluir, essas transações ficarão sem categoria. Confirma excluir?')) return;
+          state.transacoes = state.transacoes.map(t=> t.categoria_id===id ? Object.assign({},t,{categoria_id: null}) : t);
+        }
+        state.categorias = state.categorias.filter(c=>c.id!==id);
+        save(); renderCats(); renderExistingCats(); renderTable(); renderSummary(); renderChart(); alert('Categoria excluída');
+        try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('categories_delete'); }catch(e){}
+      };
 
       function renderTable(){ const tbody = document.querySelector('#tblTrans tbody'); if(!tbody) return; tbody.innerHTML=''; const m=parseInt($('selMonth').value|| (new Date().getMonth()+1)), y=parseInt($('selYear').value|| new Date().getFullYear()); const trans = state.transacoes.filter(t=>{ const d=new Date(t.data); return d.getMonth()+1===m && d.getFullYear()===y; }).sort((a,b)=>b.data.localeCompare(a.data)); trans.forEach(t=>{ const tr=document.createElement('tr'); const cat = state.categorias.find(c=>c.id===t.categoria_id); const arquivoLink = t.arquivo?`<a href="#" class="link open-file" data-id="${t.arquivo}">Abrir</a>`:''; tr.innerHTML=`<td style="padding:10px">${t.data}</td><td style="padding:10px">${t.tipo}</td><td style="padding:10px">${cat?cat.nome:'Sem'}</td><td style="padding:10px">${currency(t.valor)}</td><td style="padding:10px">${t.descricao||''}</td><td style="padding:10px">${arquivoLink}</td><td style="padding:10px"><button class="btn edit-btn" data-id="${t.id}">Editar</button> <button class="btn danger del-btn" data-id="${t.id}">Excluir</button></td>`; tbody.appendChild(tr); }); // attach handlers safely
         Array.from(document.querySelectorAll('.del-btn')).forEach(b=>{ b.onclick=(e)=>{ const id=e.target.dataset.id; if(confirm('Excluir transação?')){ state.transacoes = state.transacoes.filter(x=>x.id!==id); save(); renderTable(); renderSummary(); renderChart(); } }; });
@@ -278,8 +445,34 @@ document.addEventListener('DOMContentLoaded', function(){
 
       document.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ const modal=$('modal'); if(modal && modal.style.display==='flex') closeModal(); } });
 
+      // SAVE: when creating a NEW transaction (editingId falsy), increment demo counter if demo user
       $('btnClose').onclick = closeModal;
-      $('btnSave').onclick = async function(){ try{ const tipo=$('mTipo').value; const cid=$('mCat').value; const valor=parseFloat($('mValor').value); const dataStr=$('mData').value; const desc=$('mDesc').value; if(!cid){ alert('Escolha categoria'); return; } if(isNaN(valor)||valor<=0){ alert('Valor inválido'); return; } let fileId=null; const f=$('mFile').files[0]; if(f){ fileId='f_'+Date.now(); try{ await saveFile(fileId,f); }catch(e){ console.error(e); alert('Falha ao salvar arquivo (IndexedDB)'); fileId=null; } } if(editingId){ const idx=state.transacoes.findIndex(t=>t.id===editingId); if(idx>=0){ state.transacoes[idx].tipo=tipo; state.transacoes[idx].categoria_id=cid; state.transacoes[idx].valor=valor; state.transacoes[idx].data=dataStr; state.transacoes[idx].descricao=desc; if(fileId) state.transacoes[idx].arquivo=fileId; } }else{ const id='t_'+Date.now(); state.transacoes.push({id,tipo,categoria_id:cid,valor,data:dataStr,descricao:desc,arquivo:fileId}); } save(); renderTable(); renderSummary(); renderChart(); closeModal(); }catch(e){ console.error(e); alert('Erro: '+(e && e.message? e.message : e)); } };
+      $('btnSave').onclick = async function(){
+        try{
+          const tipo=$('mTipo').value; const cid=$('mCat').value; const valor=parseFloat($('mValor').value); const dataStr=$('mData').value; const desc=$('mDesc').value;
+          if(!cid){ alert('Escolha categoria'); return; }
+          if(isNaN(valor)||valor<=0){ alert('Valor inválido'); return; }
+          let fileId=null; const f=$('mFile').files[0];
+          if(f){ fileId='f_'+Date.now(); try{ await saveFile(fileId,f); }catch(e){ console.error(e); alert('Falha ao salvar arquivo (IndexedDB)'); fileId=null; } }
+          if(editingId){
+            const idx=state.transacoes.findIndex(t=>t.id===editingId);
+            if(idx>=0){
+              state.transacoes[idx].tipo=tipo;
+              state.transacoes[idx].categoria_id=cid;
+              state.transacoes[idx].valor=valor;
+              state.transacoes[idx].data=dataStr;
+              state.transacoes[idx].descricao=desc;
+              if(fileId) state.transacoes[idx].arquivo=fileId;
+            }
+          } else {
+            const id='t_'+Date.now();
+            state.transacoes.push({id,tipo,categoria_id:cid,valor,data:dataStr,descricao:desc,arquivo:fileId});
+            // demo increment (new transaction created)
+            try{ if(window.isDemoUser && window.isDemoUser()) window.demoIncrement && window.demoIncrement('transactions'); }catch(e){}
+          }
+          save(); renderTable(); renderSummary(); renderChart(); closeModal();
+        }catch(e){ console.error(e); alert('Erro: '+(e && e.message? e.message : e)); }
+      };
 
       $('btnExportJson').onclick = function(){ try{ const blob = new Blob([JSON.stringify(state)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='controle_financeiro_backup.json'; a.click(); setTimeout(()=>{ try{ URL.revokeObjectURL(url);}catch(e){} },1000); }catch(e){ alert('Erro ao exportar: '+e.message); } };
       $('btnExportCsv').onclick = function(){ try{ let csv = 'data,tipo,categoria,valor,descricao,arquivo\n'; state.transacoes.forEach(t=>{ const cat=(state.categorias.find(c=>c.id===t.categoria_id)||{nome:''}).nome; csv+=`"${t.data}","${t.tipo}","${cat}",${t.valor},"${(t.descricao||'').replace(/"/g,'""')}","${t.arquivo||''}"\n`; }); const blob=new Blob([csv],{type:'text/csv'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='controle_financeiro.csv'; a.click(); setTimeout(()=>{ try{ URL.revokeObjectURL(url);}catch(e){} },1000); }catch(e){ alert('Erro ao exportar CSV: '+e.message); } };
@@ -336,7 +529,6 @@ document.addEventListener('DOMContentLoaded', function(){
     el.className = 'cf-toast';
     el.textContent = msg;
     document.body.appendChild(el);
-    // force reflow then show
     requestAnimationFrame(()=> el.classList.add('show'));
     setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>el.remove(),300); }, timeout);
   };
@@ -386,10 +578,6 @@ document.addEventListener('DOMContentLoaded', function(){
     try{
       if(typeof originalRenderSummary === 'function') originalRenderSummary();
       const r = document.getElementById('txtReceita'), d=document.getElementById('txtDespesa'), s=document.getElementById('txtSaldo'), i=document.getElementById('txtInvest');
-      const parseCurrency = t=> Number(t.textContent.replace(/[^\d,-]+/g,'').replace(',','.')) || 0;
-      // read numeric values from state via DOM (fallback)
-      const rv = (r && r.textContent)? Number(r.textContent.replace(/[^\d,-]+/g,''))/100 : 0;
-      // Instead of attempting to parse, we'll get numbers from localStorage state
       try{
         const state = JSON.parse(localStorage.getItem('controle_financeiro_v1')||'{"categorias":[],"transacoes":[]}');
         const m = parseInt(document.getElementById('selMonth').value|| (new Date().getMonth()+1));
@@ -400,9 +588,7 @@ document.addEventListener('DOMContentLoaded', function(){
         window.cf_countUp(document.getElementById('txtDespesa'), 0, despesa, 700);
         window.cf_countUp(document.getElementById('txtInvest'), 0, invest, 700);
         const saldo = receita - despesa;
-        // display with sign handled by originalRenderSummary; animate numeric part
         const saldoEl = document.getElementById('txtSaldo');
-        // animate numeric value inside
         const start = 0, end = Math.round(saldo);
         if(saldoEl){ window.cf_countUp(saldoEl, start, end, 700); saldoEl.style.color = saldo>=0? 'rgb(36,107,255)' : 'rgb(229,57,53)'; }
       }catch(err){ /* ignore */ }
@@ -416,18 +602,15 @@ document.addEventListener('DOMContentLoaded', function(){
       const canvas = document.getElementById('chartCanvas');
       if(canvas){ canvas.style.opacity = '0'; canvas.style.transform = 'scale(.98)'; }
       if(typeof originalRenderChart === 'function') originalRenderChart();
-      // animate in
       requestAnimationFrame(()=>{ const c=document.getElementById('chartCanvas'); if(c){ c.style.transition='opacity .36s ease, transform .36s cubic-bezier(.2,.9,.2,1)'; c.style.opacity='1'; c.style.transform='scale(1)'; } });
     }catch(e){ console.warn('renderChart wrapper error', e); if(typeof originalRenderChart==='function') originalRenderChart(); }
   };
 
-  // small utility: show toast on create/delete category
   const btnAddCat = document.getElementById('btnAddCat');
   const btnDelCat = document.getElementById('btnDelCat');
   if(btnAddCat){ btnAddCat.addEventListener('click', ()=> setTimeout(()=> window.cf_toast('Categoria criada'), 400)); }
   if(btnDelCat){ btnDelCat.addEventListener('click', ()=> setTimeout(()=> window.cf_toast('Categoria excluída'), 400)); }
 
-  // ensure initial call to wrapped functions after a short delay to show animations on load
   setTimeout(()=>{ try{ window.renderSummary && window.renderSummary(); window.renderChart && window.renderChart(); }catch(e){} }, 400);
 
 })();
@@ -445,7 +628,6 @@ document.addEventListener('DOMContentLoaded', function(){
     try{
       if(window.openModal && typeof window.openModal === 'function'){ window.openModal(id); return; }
       if(typeof openModal === 'function'){ openModal(id); return; }
-      // fallback: show modal and try to populate from localStorage
       const modal = document.getElementById('modal');
       if(!modal) return;
       modal.style.display = 'flex';
@@ -513,7 +695,6 @@ document.addEventListener('DOMContentLoaded', function(){
     attachAdd();
     attachEditDelegation();
     attachSaveShim();
-    // observe table body to reattach if rows change
     try{
       const tbody = document.querySelector('#tblTrans tbody');
       if(tbody && !tbody.__cf_observer_installed){
@@ -527,7 +708,6 @@ document.addEventListener('DOMContentLoaded', function(){
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 
-  // also run shortly after to ensure compatibility with other scripts that run after load
   setTimeout(init, 300);
   console.log('CF button fix installed (non-invasive)');
 })();

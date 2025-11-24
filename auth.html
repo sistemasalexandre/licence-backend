@@ -13,9 +13,9 @@
   html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#071028 0%, #071827 60%);color:var(--text)}
   .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:28px}
   .panel{width:440px;max-width:94%;background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));border-radius:var(--radius);box-shadow:0 18px 50px rgba(2,6,23,0.6);padding:22px;backdrop-filter: blur(6px);border:1px solid rgba(255,255,255,0.03)}
-  .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+  .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px;justify-content:center}
   .logo{width:56px;height:56px;border-radius:12px;background:linear-gradient(90deg,var(--accent),#1fb3ff);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:20px}
-  h1{margin:0;font-size:20px}
+  h1{margin:0;font-size:20px;text-align:center}
   p.lead{margin:6px 0 18px;color:var(--muted);font-size:0.95rem}
   label{display:block;font-size:0.9rem;margin-top:10px;color:rgba(234,244,255,0.95)}
   input[type="text"], input[type="password"], input[type="email"]{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);color:var(--text);outline:none}
@@ -29,17 +29,16 @@
   .small{font-size:0.85rem}
   .license-help{font-size:0.85rem;color:var(--muted);margin-top:6px}
   .error{color:#ffb3b3;margin-top:8px}
-  footer{margin-top:14px;text-align:center;color:var(--muted);font-size:0.85rem}
+  footer{margin-top:14px;text-align:center;color:var(--muted);font-size:0.95rem}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="panel" role="main" aria-labelledby="title">
     <div class="brand">
-      <div class="logo">CF</div>
+      <div class="logo" aria-hidden="true">CF</div>
       <div>
         <h1 id="title">Acesso ao Controle Financeiro</h1>
-        <p class="lead">Crie sua conta, ative com a licença e começe a usar o app.</p>
       </div>
     </div>
 
@@ -49,7 +48,7 @@
       <div class="tab" data-tab="redeem">Ativar Licença</div>
     </div>
 
-    <!-- BOTÃO DE COMPRA -->
+    <!-- BOTÃO DE COMPRA (permanece na interface, mas será escondido automaticamente na aba "Criar Conta") -->
     <button id="buy-btn" data-price-id="price_1SUyMaRtlxX0MLkFRup9JN3Y" class="cta" style="margin-bottom:15px;width:100%">
       Comprar licença
     </button>
@@ -100,19 +99,33 @@
       <div class="error" id="redeemError" style="display:none"></div>
     </div>
 
-    <footer>Proteja seu software. Para versão comercial use validação segura no servidor.</footer>
+    <footer>Controle Financeiro: organize suas despesas, receitas e investimentos em um só lugar. Ative sua licença.</footer>
   </div>
 </div>
 
 <script>
+/* ---------- Helpers ---------- */
 function $(id){ return document.getElementById(id); }
 const tabs = document.querySelectorAll('.tab');
+const buyBtn = document.getElementById('buy-btn');
+
 tabs.forEach(t=> t.addEventListener('click', ()=> {
   document.querySelectorAll('.tab').forEach(tt=>tt.classList.remove('active'));
   t.classList.add('active');
   const target = t.dataset.tab;
   document.querySelectorAll('.pane').forEach(p=> p.style.display = p.id === target ? '' : 'none');
   ['loginError','regError','redeemError'].forEach(x=>{ const el=$(x); if(el) el.style.display='none'; });
+
+  // Hide buy button when in "Criar Conta" tab (requested)
+  try{
+    if(buyBtn){
+      if(target === 'register') {
+        buyBtn.style.display = 'none';
+      } else {
+        buyBtn.style.display = '';
+      }
+    }
+  }catch(e){}
 }));
 
 async function deriveKey(password, saltHex){
@@ -130,10 +143,48 @@ function randomHex(len){
 function arrayBufferToHex(buf){ const a = new Uint8Array(buf); return Array.from(a).map(b=>b.toString(16).padStart(2,'0')).join(''); }
 function hexToArrayBuffer(hex){ const len = hex.length/2; const u = new Uint8Array(len); for(let i=0;i<len;i++) u[i]=parseInt(hex.substr(i*2,2),16); return u.buffer; }
 
+/* ---------- Storage keys & helpers ---------- */
 const DB_KEY = 'cf_auth_v1';
+const TOKEN_KEY = 'cf_auth_token';
 function loadUsers(){ try{ return JSON.parse(localStorage.getItem(DB_KEY) || '{}'); }catch(e){ return {}; } }
 function saveUsers(u){ localStorage.setItem(DB_KEY, JSON.stringify(u)); }
+function setAuthToken(tok){ localStorage.setItem(TOKEN_KEY, JSON.stringify(tok)); }
+function getAuthToken(){ try{ return JSON.parse(localStorage.getItem(TOKEN_KEY)||'null'); }catch(e){ return null; } }
+function clearAuthToken(){ localStorage.removeItem(TOKEN_KEY); }
 
+/* Create a demo token with tx limit */
+function createDemoToken(email){
+  const now = Date.now();
+  return {
+    email,
+    issued: now,
+    expires: now + 1000 * 60 * 60 * 2, // demo valid 2 hours
+    demo: true,
+    txCount: 0,
+    txLimit: 5
+  };
+}
+
+/* Create normal (activated) token */
+function createFullToken(email){
+  const now = Date.now();
+  return {
+    email,
+    issued: now,
+    expires: now + 1000 * 60 * 60 * 24 * 7, // 7 days
+    demo: false
+  };
+}
+
+/* Show a simple alert but non-blocking: use custom toast if present */
+function showMessage(msg){
+  try{
+    if(window.cf_toast) { window.cf_toast(msg); return; }
+  }catch(e){}
+  alert(msg);
+}
+
+/* ---------- Register (Create account) ---------- */
 $('btnRegister').addEventListener('click', async ()=>{
   try{
     const email = $('reg_user').value.trim().toLowerCase();
@@ -146,6 +197,8 @@ $('btnRegister').addEventListener('click', async ()=>{
     if(pass.length < 8){ err.textContent='Use pelo menos 8 caracteres na senha.'; err.style.display='block'; return; }
     if(pass !== pass2){ err.textContent='Senhas não coincidem.'; err.style.display='block'; return; }
 
+    // verify license with backend if provided
+    let activated = false;
     if(license){
       try{
         const resp = await fetch('https://licence-backend-api.onrender.com/api/verify-license', {
@@ -156,25 +209,41 @@ $('btnRegister').addEventListener('click', async ()=>{
         if(resp.ok){
           const j = await resp.json();
           if(!j.valid){ err.textContent='Licença inválida.'; err.style.display='block'; return; }
+          activated = true;
+        } else {
+          console.warn('verify-license returned non-ok', resp.status);
         }
-      }catch(e){}
+      }catch(e){
+        console.warn('verify-license request failed', e);
+      }
     }
 
     const users = loadUsers();
     if(users[email]){ err.textContent='E-mail já cadastrado. Faça login.'; err.style.display='block'; return; }
+
     const salt = randomHex(16);
     const digest = await deriveKey(pass, salt);
-    users[email] = { salt, digest, license: license || null, activated: !!license };
+    users[email] = { salt, digest, license: license || null, activated: !!activated };
     saveUsers(users);
-    alert('Conta criada. ' + (license ? 'Licença registrada.' : 'Você pode ativar depois usando um código.')); 
-    localStorage.setItem('cf_auth_token', JSON.stringify({email, issued:Date.now(), expires: Date.now()+1000*60*60*24*7}));
-    window.location.href = 'index.html';
+
+    if(activated){
+      setAuthToken(createFullToken(email));
+      showMessage('Conta criada e licença registrada! Você será redirecionado para o app completo.');
+      window.location.href = 'index.html';
+    } else {
+      const demoTok = createDemoToken(email);
+      setAuthToken(demoTok);
+      showMessage('Conta criada. Acesso em modo DEMO (5 transações). Você será redirecionado para a demonstração.');
+      window.location.href = 'index_modified_for_demo.html';
+    }
+
   }catch(e){
     $('regError').textContent = 'Erro: ' + (e && e.message? e.message : e);
     $('regError').style.display='block';
   }
 });
 
+/* ---------- Login ---------- */
 $('btnLogin').addEventListener('click', async ()=>{
   const email = $('login_user').value.trim().toLowerCase();
   const pass = $('login_pass').value;
@@ -186,14 +255,22 @@ $('btnLogin').addEventListener('click', async ()=>{
   try{
     const digest = await deriveKey(pass, rec.salt);
     if(digest !== rec.digest){ err.textContent='Senha incorreta.'; err.style.display='block'; return; }
-    localStorage.setItem('cf_auth_token', JSON.stringify({email, issued:Date.now(), expires: Date.now()+1000*60*60*24*7}));
-    window.location.href = 'index.html';
+
+    if(rec.activated){
+      setAuthToken(createFullToken(email));
+      window.location.href = 'index.html';
+    } else {
+      setAuthToken(createDemoToken(email));
+      showMessage('Conta encontrada, mas sem licença. Você entrará na versão DEMO (5 transações).');
+      window.location.href = 'index_modified_for_demo.html';
+    }
   }catch(e){
     err.textContent='Erro no login: ' + (e && e.message? e.message : e);
     err.style.display='block';
   }
 });
 
+/* ---------- Redeem / Activate license ---------- */
 $('btnRedeem').addEventListener('click', async ()=>{
   const email = $('redeem_email').value.trim().toLowerCase();
   const code = $('redeem_code').value.trim();
@@ -213,35 +290,55 @@ $('btnRedeem').addEventListener('click', async ()=>{
         users[email].license = code;
         users[email].activated = true;
         saveUsers(users);
-        alert('Licença ativada! Agora você pode entrar.');
+        const t = getAuthToken();
+        if(t && t.email === email){
+          setAuthToken(createFullToken(email));
+        }
+        showMessage('Licença ativada! Agora você pode entrar no app completo.');
         window.location.href = 'auth.html';
         return;
       } else { err.textContent='Licença inválida.'; err.style.display='block'; return; }
+    } else {
+      err.textContent = 'Erro ao verificar licença (servidor). Tente novamente mais tarde.';
+      err.style.display='block';
+      return;
     }
-  }catch(e){}
-  const demoValid = ['DEMO-11111-AAAAA','TEST-ABCDE-12345'];
-  if(demoValid.includes(code)){
-    const users = loadUsers();
-    if(!users[email]){ err.textContent='Usuário não encontrado para este e-mail.'; err.style.display='block'; return; }
-    users[email].license = code; users[email].activated = true; saveUsers(users);
-    alert('Licença (demo) ativada. Faça login.');
-    window.location.href = 'auth.html';
+  }catch(e){
+    console.warn('Redeem error', e);
+    err.textContent = 'Erro ao conectar com o servidor de licenças.';
+    err.style.display='block';
     return;
   }
-  err.textContent='Licença inválida (demo).';
-  err.style.display='block';
 });
 
+/* ---------- Demo button ---------- */
 $('btnDemo').addEventListener('click', ()=>{
-  localStorage.setItem('cf_auth_token', JSON.stringify({email:'demo@local', issued:Date.now(), expires: Date.now()+1000*60*60*2}));
-  window.location.href = 'index.html';
+  const demoTok = createDemoToken('demo@local');
+  setAuthToken(demoTok);
+  showMessage('Entrando na versão DEMO (5 transações).');
+  window.location.href = 'index_modified_for_demo.html';
 });
 
+/* ---------- Navigation helpers ---------- */
 $('toRegister').addEventListener('click', (e)=>{ e.preventDefault(); document.querySelector('.tab[data-tab="register"]').click(); });
 $('btnBackLogin').addEventListener('click', ()=> document.querySelector('.tab[data-tab="login"]').click());
 $('btnRedeemBack').addEventListener('click', ()=> document.querySelector('.tab[data-tab="login"]').click());
 
-(function(){ try{ const t = JSON.parse(localStorage.getItem('cf_auth_token')||'null'); if(t && t.expires && Date.now()>t.expires) localStorage.removeItem('cf_auth_token'); }catch(e){} })();
+/* ---------- token cleanup on load ---------- */
+(function(){ 
+  try{ 
+    const t = JSON.parse(localStorage.getItem('cf_auth_token')||'null'); 
+    if(t && t.expires && Date.now()>t.expires) localStorage.removeItem('cf_auth_token'); 
+  }catch(e){} 
+})();
+
+/* ---------- ensure buy button initial visibility (hide if register active on page load) ---------- */
+(function(){
+  try{
+    const active = document.querySelector('.tab.active');
+    if(active && active.dataset.tab === 'register' && buyBtn) buyBtn.style.display = 'none';
+  }catch(e){}
+})();
 </script>
 
 <!-- ============================
