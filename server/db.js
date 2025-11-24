@@ -9,12 +9,15 @@ if (!connectionString) {
 
 const pool = new Pool({
   connectionString,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
-pool.on('error', err => {
+pool.on('error', (err) => {
   console.error('Unexpected PG error', err);
   process.exit(-1);
 });
 
+// Exporta como { pool } porque routes.js faz: const { pool } = require('./db')
 module.exports = { pool };
