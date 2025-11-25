@@ -1,373 +1,252 @@
-<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Acesso — Controle Financeiro</title>
-<style>
-  :root{
-    --bg:#0b1220; --card:#0f1724; --text:#e6eef8; --muted:#94a3b8;
-    --accent:#246bff; --accent-2:#2bbbad; --glass: rgba(255,255,255,0.03);
-    --radius:16px;
-  }
-  html,body{height:100%;margin:0;font-family:Inter,Arial,Helvetica,sans-serif;background:linear-gradient(135deg,#071028 0%, #071827 60%);color:var(--text)}
-  .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:28px}
-  .panel{width:440px;max-width:94%;background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));border-radius:var(--radius);box-shadow:0 18px 50px rgba(2,6,23,0.6);padding:22px;backdrop-filter: blur(6px);border:1px solid rgba(255,255,255,0.03)}
-  .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px;justify-content:center}
-  .logo{width:56px;height:56px;border-radius:12px;background:linear-gradient(90deg,var(--accent),#1fb3ff);display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:20px}
-  h1{margin:0;font-size:20px;text-align:center}
-  p.lead{margin:6px 0 18px;color:var(--muted);font-size:0.95rem}
-  label{display:block;font-size:0.9rem;margin-top:10px;color:rgba(234,244,255,0.95)}
-  input[type="text"], input[type="password"], input[type="email"]{width:100%;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);color:var(--text);outline:none}
-  .row{display:flex;gap:8px;margin-top:12px}
-  button.cta{width:100%;padding:11px;border-radius:12px;border:none;background:linear-gradient(90deg,var(--accent), #1fb3ff);color:#fff;font-weight:700;cursor:pointer;box-shadow:0 8px 18px rgba(36,107,255,0.12)}
-  .ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--text)}
-  .muted{color:var(--muted);font-size:0.9rem}
-  .tabs{display:flex;gap:8px;margin-bottom:8px}
-  .tab{flex:1;padding:8px;border-radius:8px;text-align:center;cursor:pointer;background:transparent;border:1px solid rgba(255,255,255,0.03)}
-  .tab.active{background:rgba(255,255,255,0.03);box-shadow:inset 0 -4px 16px rgba(0,0,0,0.2)}
-  .small{font-size:0.85rem}
-  .license-help{font-size:0.85rem;color:var(--muted);margin-top:6px}
-  .error{color:#ffb3b3;margin-top:8px}
-  footer{margin-top:14px;text-align:center;color:var(--muted);font-size:0.95rem}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="panel" role="main" aria-labelledby="title">
-    <div class="brand">
-      <div class="logo" aria-hidden="true">CF</div>
-      <div>
-        <h1 id="title">Acesso ao Controle Financeiro</h1>
-      </div>
-    </div>
+// server/index.js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const { createClient } = require('@supabase/supabase-js');
+const Stripe = require('stripe');
+const crypto = require('crypto');
 
-    <div class="tabs" role="tablist">
-      <div class="tab active" data-tab="login">Entrar</div>
-      <div class="tab" data-tab="register">Criar Conta</div>
-      <div class="tab" data-tab="redeem">Ativar Licença</div>
-    </div>
+const app = express();
 
-    <!-- BOTÃO DE COMPRA -->
-    <button id="buy-btn" data-price-id="price_1SUyMaRtlxX0MLkFRup9JN3Y" class="cta" style="margin-bottom:15px;width:100%">
-      Comprar licença
-    </button>
+/* ----------------- config ----------------- */
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  console.error('Faltando SUPABASE_URL ou SUPABASE_SERVICE_ROLE nas envs.');
+  process.exit(1);
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
-    <!-- LOGIN -->
-    <div id="login" class="pane">
-      <label for="login_user">Usuário (e-mail)</label>
-      <input id="login_user" type="email" placeholder="seu@exemplo.com" autocomplete="username">
-      <label for="login_pass">Senha</label>
-      <input id="login_pass" type="password" placeholder="••••••••" autocomplete="current-password">
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button id="btnLogin" class="cta">Entrar</button>
-        <button id="btnDemo" class="cta ghost" style="width:120px">Demo</button>
-      </div>
-      <div class="error" id="loginError" style="display:none"></div>
-      <div class="muted small" style="margin-top:10px">Não tem conta? <a href="#" id="toRegister" style="color:inherit;text-decoration:underline">Crie uma</a></div>
-    </div>
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || null;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || null;
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
 
-    <!-- REGISTER -->
-    <div id="register" class="pane" style="display:none">
-      <label for="reg_user">E-mail</label>
-      <input id="reg_user" type="email" placeholder="seu@exemplo.com" autocomplete="email">
-      <label for="reg_pass">Senha (mín 8 caracteres)</label>
-      <input id="reg_pass" type="password" placeholder="Senh@123" autocomplete="new-password">
-      <label for="reg_pass2">Repita a senha</label>
-      <input id="reg_pass2" type="password" placeholder="Repita a senha">
-      <label for="reg_license">Código de licença (opcional)</label>
-      <input id="reg_license" type="text" placeholder="AAAAA-11111" autocomplete="off">
-      <div class="license-help">Se você comprou, insira o código de ativação. Se ainda não comprou, deixe em branco e crie uma conta de avaliação (Demo).</div>
+const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS || '10', 10);
 
-      <div class="row">
-        <button id="btnRegister" class="cta">Criar conta</button>
-        <button id="btnBackLogin" class="cta ghost" style="width:120px">Voltar</button>
-      </div>
-      <div class="error" id="regError" style="display:none"></div>
-    </div>
+let stripe = null;
+if (STRIPE_SECRET_KEY) {
+  stripe = Stripe(STRIPE_SECRET_KEY);
+  console.log('Stripe inicializado.');
+} else {
+  console.log('Stripe não configurado.');
+}
 
-    <!-- REDEEM -->
-    <div id="redeem" class="pane" style="display:none">
-      <label for="redeem_email">E-mail cadastrado</label>
-      <input id="redeem_email" type="email" placeholder="seu@exemplo.com">
-      <label for="redeem_code">Código de licença</label>
-      <input id="redeem_code" type="text" placeholder="ABCDE-12345">
-      <div class="row">
-        <button id="btnRedeem" class="cta">Ativar</button>
-        <button id="btnRedeemBack" class="cta ghost" style="width:120px">Voltar</button>
-      </div>
-      <div class="error" id="redeemError" style="display:none"></div>
-    </div>
+/* ----------------- middlewares ----------------- */
+app.use(express.json());
+// for webhook we will use express.raw on that route
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 
-    <footer>Controle Financeiro: organize suas despesas, receitas e investimentos em um só lugar. Ative sua licença.</footer>
-  </div>
-</div>
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
 
-<script>
-/* ============================
-   CONFIG — ajuste aqui se necessário
-   ============================ */
-const BACKEND_BASE = 'https://licence-backend-api.onrender.com'; // substitua se for outro domínio
-/* ============================ */
+/* ----------------- helpers ----------------- */
+function genLicenseCode() {
+  const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
+  return `${part()}-${part()}-${part()}`;
+}
 
-/* ---------- DOM helpers ---------- */
-function $(id){ return document.getElementById(id); }
-const tabs = document.querySelectorAll('.tab');
-const buyBtn = document.getElementById('buy-btn');
+/* ----------------- health ----------------- */
+app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/', (req, res) => res.send('Licence backend OK'));
 
-tabs.forEach(t=> t.addEventListener('click', ()=> {
-  document.querySelectorAll('.tab').forEach(tt=>tt.classList.remove('active'));
-  t.classList.add('active');
-  const target = t.dataset.tab;
-  document.querySelectorAll('.pane').forEach(p=> p.style.display = p.id === target ? '' : 'none');
-  ['loginError','regError','redeemError'].forEach(x=>{ const el=$(x); if(el) el.style.display='none'; });
+/* ================= REGISTER ================= */
+app.post('/api/register', async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
 
-  // Hide buy button when in "Criar Conta" tab
-  try{
-    if(buyBtn){
-      buyBtn.style.display = (target === 'register') ? 'none' : '';
-    }
-  }catch(e){}
-}));
+    const { data: exists, error: errExists } = await supabase.from('users').select('id').eq('email', email).limit(1);
+    if (errExists) throw errExists;
+    if (exists && exists.length) return res.status(400).json({ error: 'Usuário já existe' });
 
-/* ---------- Local auth state (minimal) ----------
- We store only the logged-in email in localStorage so the app can keep session.
- The actual auth (users/password) is handled by the backend (DB).
------------------------------------------------ */
-const AUTH_EMAIL_KEY = 'cf_logged_email';
-function setLoggedEmail(email){ if(email) localStorage.setItem(AUTH_EMAIL_KEY, email); else localStorage.removeItem(AUTH_EMAIL_KEY); }
-function getLoggedEmail(){ return localStorage.getItem(AUTH_EMAIL_KEY) || null; }
+    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-/* ---------- Small helpers ---------- */
-function showErr(id, msg){ const el=$(id); if(!el) return; el.textContent = msg; el.style.display = 'block'; }
-function hideErr(id){ const el=$(id); if(el) el.style.display='none'; }
-function showMsg(msg){ try{ if(window.cf_toast){ window.cf_toast(msg); return; } }catch(e){} alert(msg); }
+    const payload = { email, password_hash, name: name || null, created_at: new Date().toISOString() };
+    const { data, error } = await supabase.from('users').insert([payload]).select();
+    if (error) throw error;
 
-/* ---------- Register (Create account) ----------
- Flow:
- 1) POST /api/register { email, password, name? }
-  - on success, optionally activate license if user entered code (calls /api/activate-license)
-  - then redirect:
-    - if hasLicense true -> index.html
-    - else -> demo page
------------------------------------------------ */
-$('btnRegister').addEventListener('click', async ()=>{
-  try{
-    hideErr('regError');
-    const email = $('reg_user').value.trim().toLowerCase();
-    const pass = $('reg_pass').value;
-    const pass2 = $('reg_pass2').value;
-    const license = $('reg_license').value.trim();
-    if(!email || !pass){ showErr('regError','Preencha e-mail e senha.'); return; }
-    if(pass.length < 8){ showErr('regError','Use pelo menos 8 caracteres na senha.'); return; }
-    if(pass !== pass2){ showErr('regError','Senhas não coincidem.'); return; }
-
-    // 1) register
-    const r1 = await fetch(BACKEND_BASE + '/api/register', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ email, password: pass })
-    });
-    if(!r1.ok){
-      const t = await r1.text();
-      showErr('regError', 'Erro ao cadastrar: ' + (t || r1.status));
-      return;
-    }
-    const j1 = await r1.json();
-    if(!j1.ok){ showErr('regError', j1.error || 'Erro ao cadastrar'); return; }
-
-    // 2) if license was provided at registration, try to activate it
-    let hasLicense = false;
-    if(license){
-      try{
-        const r2 = await fetch(BACKEND_BASE + '/api/activate-license', {
-          method:'POST',
-          headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ email, code: license })
-        });
-        if(r2.ok){
-          const j2 = await r2.json();
-          if(j2.ok) hasLicense = true;
-          else console.warn('activate-license returned not ok', j2);
-        } else {
-          console.warn('activate-license status', r2.status);
-        }
-      }catch(e){
-        console.warn('activate-license failed', e);
-      }
-    }
-
-    // 3) set logged email and redirect
-    setLoggedEmail(email);
-    showMsg('Conta criada com sucesso.');
-    if(hasLicense) { window.location.href = '/index.html'; }
-    else { window.location.href = '/demo.html'; }
-
-  }catch(e){
-    console.error(e);
-    showErr('regError', 'Erro: ' + (e.message || e));
+    const user = data && data[0];
+    return res.json({ ok: true, user: { id: user.id, email: user.email } });
+  } catch (err) {
+    console.error('REGISTER error:', err);
+    return res.status(500).json({ error: err.message || 'Erro interno' });
   }
 });
 
-/* ---------- Login ----------
- Flow:
- - POST /api/login { email, password }
- - response: { ok:true, user:{...}, hasLicense: boolean }
- - set logged email and redirect accordingly
------------------------------------------------ */
-$('btnLogin').addEventListener('click', async ()=>{
-  try{
-    hideErr('loginError');
-    const email = $('login_user').value.trim().toLowerCase();
-    const pass = $('login_pass').value;
-    if(!email||!pass){ showErr('loginError','Preencha usuário e senha.'); return; }
+/* ================= LOGIN ================= */
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
 
-    const r = await fetch(BACKEND_BASE + '/api/login', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ email, password: pass })
-    });
-    if(!r.ok){
-      const t = await r.text();
-      showErr('loginError','Erro ao logar: ' + (t || r.status));
-      return;
-    }
-    const j = await r.json();
-    if(!j.ok){ showErr('loginError', j.error || 'Erro no login'); return; }
+    const { data, error } = await supabase.from('users').select('*').eq('email', email).limit(1);
+    if (error) throw error;
+    const user = data && data[0];
+    if (!user) return res.status(400).json({ error: 'Usuário não encontrado' });
 
-    setLoggedEmail(email);
-    if(j.hasLicense) window.location.href = '/index.html';
-    else window.location.href = '/demo.html';
-  }catch(e){
-    console.error(e);
-    showErr('loginError', 'Erro: ' + (e.message || e));
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Senha incorreta' });
+
+    const { data: ul, error: ulErr } = await supabase.from('user_licenses').select('*').eq('user_email', email).limit(1);
+    if (ulErr) console.warn('Aviso ao buscar user_licenses:', ulErr);
+    const hasLicense = ul && ul.length > 0;
+
+    return res.json({ ok: true, user: { id: user.id, email: user.email }, hasLicense: !!hasLicense });
+  } catch (err) {
+    console.error('LOGIN error:', err);
+    return res.status(500).json({ error: err.message || 'Erro interno' });
   }
 });
 
-/* ---------- Redeem / Activate license (logged-in or not) ----------
- Flow:
- - POST /api/activate-license { email, code }
- - on success redirect to index.html
------------------------------------------------ */
-$('btnRedeem').addEventListener('click', async ()=>{
-  try{
-    hideErr('redeemError');
-    const email = $('redeem_email').value.trim().toLowerCase();
-    const code = $('redeem_code').value.trim();
-    if(!email || !code){ showErr('redeemError','Preencha e-mail e código.'); return; }
+/* ================= ACTIVATE LICENSE (manual) ================= */
+app.post('/api/activate-license', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) return res.status(400).json({ error: 'email e code necessários' });
 
-    const r = await fetch(BACKEND_BASE + '/api/activate-license', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ email, code })
-    });
-    if(!r.ok){
-      const txt = await r.text();
-      showErr('redeemError', 'Erro ao ativar: ' + (txt || r.status));
-      return;
-    }
-    const j = await r.json();
-    if(!j.ok){ showErr('redeemError', j.error || 'Erro ao ativar'); return; }
+    const { data: licData, error: licErr } = await supabase.from('licenses').select('*').eq('code', code).limit(1);
+    if (licErr) throw licErr;
+    const license = licData && licData[0];
+    if (!license) return res.status(400).json({ error: 'Licença não encontrada' });
 
-    // se o usuário estiver logado, atualizamos local storage (logged email)
-    const logged = getLoggedEmail();
-    if(logged && logged === email){
-      // nothing else to do client-side: backend updated user_licenses
-    } else {
-      // set as logged (optional) so they can access index if desired
-      setLoggedEmail(email);
+    if (license.status && !['available', 'unused', 'reserved'].includes(license.status)) {
+      return res.status(400).json({ error: 'Licença não disponível' });
     }
 
-    showMsg('Licença ativada! Você já pode entrar no app completo.');
-    window.location.href = '/index.html';
-  }catch(e){
-    console.error(e);
-    showErr('redeemError','Erro: ' + (e.message || e));
+    const licenseKey = license.license_key || license.code;
+
+    const { data: check, error: checkErr } = await supabase
+      .from('user_licenses')
+      .select('id')
+      .eq('user_email', email)
+      .eq('license_key', licenseKey)
+      .limit(1);
+    if (checkErr) throw checkErr;
+
+    if (!check || !check.length) {
+      const { error: insErr } = await supabase.from('user_licenses').insert([{
+        user_email: email,
+        license_key: licenseKey,
+        activated_at: new Date().toISOString()
+      }]);
+      if (insErr) throw insErr;
+    }
+
+    const { error: updErr } = await supabase.from('licenses').update({
+      status: 'used',
+      used_by: email,
+      used_at: new Date().toISOString()
+    }).eq('code', code);
+    if (updErr) throw updErr;
+
+    return res.json({ ok: true, message: 'Licença ativada' });
+  } catch (err) {
+    console.error('ACTIVATE-LICENSE error:', err);
+    return res.status(500).json({ error: err.message || 'Erro interno' });
   }
 });
 
-/* ---------- Demo shortcut ---------- */
-$('btnDemo').addEventListener('click', ()=>{
-  showMsg('Entrando na versão DEMO.');
-  window.location.href = '/demo.html';
+/* ================= CREATE CHECKOUT SESSION ================= */
+app.post('/api/create-checkout-session', async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: 'Stripe não configurado' });
+    const { priceId, customerEmail } = req.body;
+    if (!priceId) return res.status(400).json({ error: 'priceId required' });
+
+    const code = genLicenseCode();
+    const payload = { code, license_key: code, status: 'reserved', created_at: new Date().toISOString() };
+    const { data: licInsert, error: licErr } = await supabase.from('licenses').insert([payload]).select();
+    if (licErr) throw licErr;
+    const license = licInsert && licInsert[0];
+
+    const sessionPayload = {
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: (FRONTEND_URL || '') + '/auth.html?success=1',
+      cancel_url: (FRONTEND_URL || '') + '/auth.html?cancel=1',
+      metadata: { license_code: license.code }
+    };
+    if (customerEmail) sessionPayload.customer_email = customerEmail;
+
+    const session = await stripe.checkout.sessions.create(sessionPayload);
+    return res.json({ ok: true, url: session.url, id: session.id });
+  } catch (err) {
+    console.error('CREATE-CHECKOUT error:', err);
+    return res.status(500).json({ error: err.message || 'Erro interno' });
+  }
 });
 
-/* ---------- Navigation helpers ---------- */
-$('toRegister').addEventListener('click', (e)=>{ e.preventDefault(); document.querySelector('.tab[data-tab="register"]').click(); });
-$('btnBackLogin').addEventListener('click', ()=> document.querySelector('.tab[data-tab="login"]').click());
-$('btnRedeemBack').addEventListener('click', ()=> document.querySelector('.tab[data-tab="login"]').click());
+/* ================= Stripe webhook ================= */
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    if (!stripe) { console.warn('Webhook chamado sem stripe configurado'); return res.status(200).send({ received: true }); }
 
-/* ---------- init: hide buy button if register is active ---------- */
-(function(){
-  try{
-    const active = document.querySelector('.tab.active');
-    if(active && active.dataset.tab === 'register' && buyBtn) buyBtn.style.display = 'none';
-  }catch(e){}
-})();
-</script>
-
-<!-- ============================
-     SNIPPET: Stripe Checkout integrado ao backend
-     - abre a sessão criada no backend (/api/create-checkout-session)
-     - backend deve receber customerEmail para atrelamento posterior
-     ============================ -->
-<script>
-(async () => {
-  const buyBtn = document.getElementById('buy-btn');
-  if (!buyBtn) return;
-
-  async function createCheckoutSession(priceId, customerEmail) {
+    const sig = req.headers['stripe-signature'];
+    let event;
     try {
-      const url = BACKEND_BASE + '/api/create-checkout-session';
-      const body = { priceId, customerEmail };
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!resp.ok) {
-        const t = await resp.text();
-        throw new Error('Erro: ' + (t || resp.status));
+      if (STRIPE_WEBHOOK_SECRET) {
+        event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+      } else {
+        event = JSON.parse(req.body.toString());
       }
-      const j = await resp.json();
-      if (!j.url) throw new Error('Resposta inválida do servidor');
-      window.location.href = j.url;
     } catch (err) {
-      console.error('createCheckoutSession error', err);
-      alert('Falha ao iniciar pagamento: ' + (err.message || err));
+      console.error('Webhook signature verification failed.', err?.message || err);
+      return res.status(400).send(`Webhook Error: ${err?.message || 'invalid signature'}`);
     }
-  }
 
-  buyBtn.addEventListener('click', async (ev) => {
-    ev.preventDefault();
-    const btn = ev.currentTarget;
-    const priceId = btn.dataset.priceId || 'price_test_123';
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const license_code = session.metadata && session.metadata.license_code;
+      const customer_email = session.customer_email || null;
 
-    // prefer email já logado ou preenchido no formulário
-    let customerEmail = getLoggedEmail();
-    try{
-      if(!customerEmail){
-        const emailField = document.getElementById('login_user') || document.getElementById('reg_user');
-        if(emailField && emailField.value) customerEmail = emailField.value.trim().toLowerCase();
+      if (license_code) {
+        try {
+          const { data: lic } = await supabase.from('licenses').select('*').eq('code', license_code).limit(1);
+          const license = lic && lic[0];
+          if (license) {
+            await supabase.from('licenses').update({ status: 'used', used_by: customer_email, used_at: new Date().toISOString() }).eq('code', license_code);
+
+            const licenseKey = license.license_key ?? license.code;
+            if (customer_email) {
+              const emailLower = customer_email.toLowerCase();
+              const { data: u } = await supabase.from('users').select('*').eq('email', emailLower).limit(1);
+              const user = u && u[0];
+              if (user) {
+                await supabase.from('user_licenses').insert([{ user_email: emailLower, license_key: licenseKey, activated_at: new Date().toISOString() }]);
+              } else {
+                // optional: create placeholder user here if you want
+              }
+            }
+          }
+        } catch (procErr) {
+          console.error('Erro processando checkout.session.completed:', procErr);
+        }
       }
-    }catch(e){}
-
-    if(!customerEmail){
-      customerEmail = prompt('Digite seu e-mail para receber a licença (recomendado)') || '';
-      customerEmail = customerEmail.trim().toLowerCase();
     }
 
-    btn.disabled = true;
-    const previous = btn.textContent;
-    btn.textContent = 'Aguarde...';
+    return res.json({ received: true });
+  } catch (err) {
+    console.error('WEBHOOK error:', err);
+    return res.status(500).send('Webhook processing error');
+  }
+});
 
-    await createCheckoutSession(priceId, customerEmail || undefined);
+/* ================= Debug: list licenses ================= */
+app.get('/api/licenses', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('licenses').select('*').order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    res.json({ ok: true, licenses: data });
+  } catch (err) {
+    console.error('LICENCES list error:', err);
+    res.status(500).json({ error: err.message || 'Erro interno' });
+  }
+});
 
-    btn.disabled = false;
-    btn.textContent = previous;
-  });
-})();
-</script>
-
-</body>
-</html>
+/* ----------------- start ----------------- */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server rodando na porta ${PORT}`));
