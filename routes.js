@@ -1,78 +1,109 @@
 // server/routes.js
-// Roteador opcional — você pode remover este arquivo se quiser, mas aqui vai a versão 100% compatível, corrigida e simplificada.
+// Versão atualizada — cole todo esse arquivo no seu projeto (substitui o anterior)
 
 const express = require('express');
 const router = express.Router();
-
-const bcrypt = require('bcryptjs'); // ✔ O CERTO! (antes estava 'bcrypt')
-const { createClient } = require('@supabase/supabase-js');
+const bodyParser = require('body-parser');
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const Stripe = require('stripe');
-
-// Variáveis carregadas do index.js (injetadas)
+// Nota: supabase e stripe são injetados via init(deps)
 let supabase = null;
 let stripe = null;
 
-function init(deps) {
-  supabase = deps.supabase;
-  stripe = deps.stripe;
+/**
+ * Inicializa dependências injetadas pelo index.js (ou por quem importar).
+ * Ex: init({ supabase: supabaseClient, stripe: stripeClient })
+ */
+function init(deps = {}) {
+  if (deps.supabase) supabase = deps.supabase;
+  if (deps.stripe) stripe = deps.stripe;
 }
 
+/* ---------------------------
+   Middlewares para o router
+   --------------------------- */
+// aceitar JSON normalmente para TODO o router (exceto webhook, que usa raw)
+router.use(express.json());
+
 /* ========================================================================
-   Função para gerar códigos de licença
+   Helpers
 ======================================================================== */
 function genLicenseCode() {
   const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
   return `${part()}-${part()}-${part()}`;
 }
 
+function safeJson(obj) {
+  try { return JSON.stringify(obj); } catch(e) { return '{}'; }
+}
+
 /* ========================================================================
-   REGISTER
+   ROUTES
+   Todas na base /api/.... (assim bate com o que você vem testando)
 ======================================================================== */
-router.post('/register', async (req, res) => {
+
+/* -------------------------
+   Register
+------------------------- */
+router.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
     if (!email || !password)
       return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
 
-    const { data: exists } = await supabase
+    // checa se já existe
+    const { data: exists, error: selErr } = await supabase
       .from('users')
       .select('email')
       .eq('email', email)
       .limit(1);
 
+    if (selErr) {
+      console.error('Supabase SELECT error (register):', selErr);
+      throw selErr;
+    }
+
     if (exists && exists.length)
       return res.status(400).json({ error: 'Usuário já existe.' });
 
+    // hash da senha
     const hash = await bcrypt.hash(password, 10);
 
-    const payload = { email, password_hash: hash };
+    const payload = { email, password_hash: hash, created_at: new Date().toISOString() };
     if (name) payload.name = name;
 
-    const { error } = await supabase.from('users').insert([payload]);
-    if (error) throw error;
+    const { error: insertErr } = await supabase.from('users').insert([payload]);
+    if (insertErr) {
+      console.error('Supabase INSERT error (register):', insertErr);
+      throw insertErr;
+    }
 
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
     console.error('REGISTER error:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || safeJson(err) });
   }
 });
 
-/* ========================================================================
-   LOGIN
-======================================================================== */
-router.post('/login', async (req, res) => {
+/* -------------------------
+   Login
+------------------------- */
+router.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password)
       return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
 
-    const { data } = await supabase
+    const { data, error: selErr } = await supabase
       .from('users')
       .select('*')
       .eq('email', email)
       .limit(1);
+
+    if (selErr) {
+      console.error('Supabase SELECT error (login):', selErr);
+      throw selErr;
+    }
 
     const user = data && data[0];
     if (!user) return res.status(400).json({ error: 'Usuário não encontrado.' });
@@ -80,37 +111,49 @@ router.post('/login', async (req, res) => {
     const check = await bcrypt.compare(password, user.password_hash);
     if (!check) return res.status(401).json({ error: 'Senha incorreta.' });
 
-    const { data: lic } = await supabase
+    // busca licença vinculada (se houver)
+    const { data: lic, error: licErr } = await supabase
       .from('user_licenses')
       .select('*')
       .eq('user_email', email)
       .limit(1);
 
-    res.json({
+    if (licErr) {
+      console.error('Supabase SELECT error (login -> user_licenses):', licErr);
+      // não falha por completo; apenas avisa
+    }
+
+    return res.json({
       ok: true,
-      hasLicense: lic && lic.length > 0,
+      hasLicense: Array.isArray(lic) && lic.length > 0,
       user: { email }
     });
   } catch (err) {
     console.error('LOGIN error:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err?.message || safeJson(err) });
   }
 });
 
-/* ========================================================================
-   ATIVAR LICENÇA
-======================================================================== */
-router.post('/activate-license', async (req, res) => {
+/* -------------------------
+   Activate license (manual)
+   Ex: cliente envia email + code e ativa
+------------------------- */
+router.post('/api/activate-license', async (req, res) => {
   try {
     const { email, code } = req.body;
     if (!email || !code)
       return res.status(400).json({ error: 'E-mail e código obrigatórios.' });
 
-    const { data: lic } = await supabase
+    const { data: lic, error: licErr } = await supabase
       .from('licenses')
       .select('*')
       .eq('code', code)
       .limit(1);
+
+    if (licErr) {
+      console.error('Supabase SELECT error (activate):', licErr);
+      throw licErr;
+    }
 
     const license = lic && lic[0];
     if (!license) return res.status(400).json({ error: 'Licença não encontrada.' });
@@ -120,21 +163,26 @@ router.post('/activate-license', async (req, res) => {
 
     const licenseKey = license.license_key ?? license.code;
 
-    const { data: exists } = await supabase
+    const { data: exists, error: exErr } = await supabase
       .from('user_licenses')
       .select('*')
       .eq('user_email', email)
       .eq('license_key', licenseKey)
       .limit(1);
 
-    if (!exists || !exists.length) {
-      const { error } = await supabase
-        .from('user_licenses')
-        .insert([{ user_email: email, license_key: licenseKey }]);
-      if (error) throw error;
+    if (exErr) {
+      console.error('Supabase SELECT error (activate -> user_licenses):', exErr);
+      throw exErr;
     }
 
-    await supabase
+    if (!exists || !exists.length) {
+      const { error: insErr } = await supabase
+        .from('user_licenses')
+        .insert([{ user_email: email, license_key: licenseKey }]);
+      if (insErr) throw insErr;
+    }
+
+    const { error: updErr } = await supabase
       .from('licenses')
       .update({
         status: 'used',
@@ -143,14 +191,8 @@ router.post('/activate-license', async (req, res) => {
       })
       .eq('code', code);
 
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('ACTIVATE-LICENSE error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+    if (updErr) throw updErr;
 
-/* ========================================================================
-   EXPORTS
-======================================================================== */
-module.exports = { router, init };
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('ACTIVATE-LICEN
