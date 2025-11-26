@@ -1,50 +1,47 @@
 // server/routes.js
-// Substitua todo o arquivo por este conteúdo
+// Versão atualizada — cole todo esse arquivo no seu projeto (substitui o anterior)
 
 const express = require('express');
 const router = express.Router();
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-
-// supabase client (criado a partir das envs)
-const { createClient } = require('@supabase/supabase-js');
-
-// stripe (opcional)
+// Nota: supabase e stripe serão injetados via init(deps)
+let supabase = null;
 let stripe = null;
 
-function safeJson(obj) {
-  try { return JSON.stringify(obj); } catch(e) { return '{}'; }
+/**
+ * Inicializa dependências injetadas pelo index.js (ou por quem importar).
+ * Ex: init({ supabase: supabaseClient, stripe: stripeClient })
+ */
+function init(deps = {}) {
+  if (deps.supabase) supabase = deps.supabase;
+  if (deps.stripe) stripe = deps.stripe;
+  console.log('Routes initialized. Supabase OK?', !!supabase, 'Stripe OK?', !!stripe);
 }
 
+/* ---------------------------
+   Middlewares para o router
+   --------------------------- */
+// aceitar JSON normalmente para TODO o router (exceto webhook, que usa raw)
+router.use(express.json());
+
+/* ========================================================================
+   Helpers
+======================================================================== */
 function genLicenseCode() {
   const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
   return `${part()}-${part()}-${part()}`;
 }
 
-/* ---------------------------
-   Init: cria clientes usando env vars
-   (Chamado automaticamente quando o módulo é require()d)
-----------------------------*/
-const SUPABASE_URL = process.env.SUPABASE_URL || null;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY || null;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-  console.error('WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE not set in environment. Many routes will fail.');
+function safeJson(obj) {
+  try { return JSON.stringify(obj); } catch(e) { return '{}'; }
 }
 
-const supabase = createClient(SUPABASE_URL || '', SUPABASE_SERVICE_ROLE || '');
-
-if (process.env.STRIPE_SECRET_KEY) {
-  const Stripe = require('stripe');
-  stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-  console.log('Stripe initialized in routes.js');
-} else {
-  console.log('Stripe not configured (STRIPE_SECRET_KEY missing) in routes.js');
-}
-
-/* use JSON for router requests (webhook uses raw below) */
-router.use(express.json());
+/* ========================================================================
+   ROUTES
+   Todas na base /api/.... (assim bate com o que você vem testando)
+======================================================================== */
 
 /* -------------------------
    Register
@@ -52,21 +49,25 @@ router.use(express.json());
 router.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
+    if (!email || !password)
+      return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
+
+    if (!supabase) return res.status(500).json({ error: 'Supabase não configurado' });
 
     // checa se já existe
     const { data: exists, error: selErr } = await supabase
       .from('users')
-      .select('id,email')
+      .select('email')
       .eq('email', email)
       .limit(1);
 
     if (selErr) {
       console.error('Supabase SELECT error (register):', selErr);
-      return res.status(500).json({ error: selErr.message || 'Supabase error' });
+      throw selErr;
     }
 
-    if (exists && exists.length) return res.status(400).json({ error: 'Usuário já existe.' });
+    if (exists && exists.length)
+      return res.status(400).json({ error: 'Usuário já existe.' });
 
     // hash da senha
     const hash = await bcrypt.hash(password, 10);
@@ -74,13 +75,13 @@ router.post('/api/register', async (req, res) => {
     const payload = { email, password_hash: hash, created_at: new Date().toISOString() };
     if (name) payload.name = name;
 
-    const { data: inserted, error: insertErr } = await supabase.from('users').insert([payload]).select('id,email').single();
+    const { data: inserted, error: insertErr } = await supabase.from('users').insert([payload]).select();
     if (insertErr) {
       console.error('Supabase INSERT error (register):', insertErr);
-      return res.status(500).json({ error: insertErr.message || 'Erro ao inserir usuário' });
+      throw insertErr;
     }
 
-    return res.json({ ok: true, user: { id: inserted.id, email: inserted.email } });
+    return res.json({ ok: true, user: inserted && inserted[0] ? { id: inserted[0].id, email: inserted[0].email } : null });
   } catch (err) {
     console.error('REGISTER error:', err);
     return res.status(500).json({ error: err?.message || safeJson(err) });
@@ -93,7 +94,10 @@ router.post('/api/register', async (req, res) => {
 router.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
+    if (!email || !password)
+      return res.status(400).json({ error: 'E-mail e senha obrigatórios.' });
+
+    if (!supabase) return res.status(500).json({ error: 'Supabase não configurado' });
 
     const { data, error: selErr } = await supabase
       .from('users')
@@ -103,7 +107,7 @@ router.post('/api/login', async (req, res) => {
 
     if (selErr) {
       console.error('Supabase SELECT error (login):', selErr);
-      return res.status(500).json({ error: selErr.message || 'Supabase error' });
+      throw selErr;
     }
 
     const user = data && data[0];
@@ -113,15 +117,21 @@ router.post('/api/login', async (req, res) => {
     if (!check) return res.status(401).json({ error: 'Senha incorreta.' });
 
     // busca licença vinculada (se houver)
-    const { data: lic, error: licErr } = await supabase
-      .from('user_licenses')
-      .select('*')
-      .eq('user_email', email)
-      .limit(1);
+    let lic = [];
+    try {
+      const { data: licData, error: licErr } = await supabase
+        .from('user_licenses')
+        .select('*')
+        .eq('user_email', email)
+        .limit(1);
 
-    if (licErr) {
-      console.error('Supabase SELECT error (login -> user_licenses):', licErr);
-      // não falha por completo, retorna hasLicense=false
+      if (licErr) {
+        console.error('Supabase SELECT error (login -> user_licenses):', licErr);
+      } else {
+        lic = licData || [];
+      }
+    } catch (e) {
+      console.error('Erro verificando user_licenses:', e);
     }
 
     return res.json({
@@ -137,14 +147,17 @@ router.post('/api/login', async (req, res) => {
 
 /* -------------------------
    Activate license (manual)
+   Ex: cliente envia email + code e ativa
 ------------------------- */
 router.post('/api/activate-license', async (req, res) => {
   try {
     const { email, code } = req.body;
-    if (!email || !code) return res.status(400).json({ error: 'E-mail e código obrigatórios.' });
+    if (!email || !code)
+      return res.status(400).json({ error: 'E-mail e código obrigatórios.' });
 
-    // procura licença pelo código (code)
-    const { data: licRows, error: licErr } = await supabase
+    if (!supabase) return res.status(500).json({ error: 'Supabase não configurado' });
+
+    const { data: lic, error: licErr } = await supabase
       .from('licenses')
       .select('*')
       .eq('code', code)
@@ -152,29 +165,27 @@ router.post('/api/activate-license', async (req, res) => {
 
     if (licErr) {
       console.error('Supabase SELECT error (activate):', licErr);
-      return res.status(500).json({ error: licErr.message || 'Supabase error' });
+      throw licErr;
     }
 
-    const license = licRows && licRows[0];
+    const license = lic && lic[0];
     if (!license) return res.status(400).json({ error: 'Licença não encontrada.' });
 
-    if (license.status && !['available','reserved','unused'].includes(license.status)) {
-      return res.status(400).json({ error: 'Licença não disponível.' });
-    }
+    if (license.status !== 'available' && license.status !== 'reserved')
+      return res.status(400).json({ error: 'Licença já utilizada.' });
 
     const licenseKey = license.license_key ?? license.code;
 
-    // evita duplicata
     const { data: exists, error: exErr } = await supabase
       .from('user_licenses')
-      .select('id')
+      .select('*')
       .eq('user_email', email)
       .eq('license_key', licenseKey)
       .limit(1);
 
     if (exErr) {
       console.error('Supabase SELECT error (activate -> user_licenses):', exErr);
-      return res.status(500).json({ error: exErr.message || 'Supabase error' });
+      throw exErr;
     }
 
     if (!exists || !exists.length) {
@@ -182,23 +193,23 @@ router.post('/api/activate-license', async (req, res) => {
         .from('user_licenses')
         .insert([{ user_email: email, license_key: licenseKey, activated_at: new Date().toISOString() }]);
       if (insErr) {
-        console.error('Supabase INSERT error (user_licenses):', insErr);
-        return res.status(500).json({ error: insErr.message || 'Erro ao inserir user_license' });
+        console.error('Supabase INSERT error (activate -> user_licenses):', insErr);
+        throw insErr;
       }
     }
 
-    // atualiza a licença para used / assigned
     const { error: updErr } = await supabase
       .from('licenses')
-      .update({ status: 'used', used_by: email, used_at: new Date().toISOString() })
+      .update({
+        status: 'used',
+        used_by: email,
+        used_at: new Date().toISOString()
+      })
       .eq('code', code);
 
-    if (updErr) {
-      console.error('Supabase UPDATE error (licenses):', updErr);
-      return res.status(500).json({ error: updErr.message || 'Erro ao atualizar licença' });
-    }
+    if (updErr) throw updErr;
 
-    return res.json({ ok: true, message: 'Licença ativada' });
+    return res.json({ ok: true });
   } catch (err) {
     console.error('ACTIVATE-LICENSE error:', err);
     return res.status(500).json({ error: err?.message || safeJson(err) });
@@ -206,40 +217,17 @@ router.post('/api/activate-license', async (req, res) => {
 });
 
 /* -------------------------
-   has-license (GET)
-------------------------- */
-router.get('/api/has-license', async (req, res) => {
-  try {
-    const email = req.query.email;
-    if (!email) return res.status(400).json({ error: 'email é necessário' });
-
-    const { data: ul, error } = await supabase
-      .from('user_licenses')
-      .select('*')
-      .eq('user_email', email)
-      .limit(1);
-
-    if (error) {
-      console.error('Supabase (has-license):', error);
-      return res.status(500).json({ error: error.message || 'Supabase error' });
-    }
-
-    return res.json({ ok: true, hasLicense: !!(ul && ul.length) });
-  } catch (err) {
-    console.error('HAS-LICENSE error:', err);
-    return res.status(500).json({ error: err?.message || safeJson(err) });
-  }
-});
-
-/* -------------------------
    Create Checkout Session (Stripe)
+   - Expects: priceId, successUrl, cancelUrl, userEmail (optional)
+   - Requires stripe inited via init({ stripe })
 ------------------------- */
 router.post('/api/create-checkout-session', async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: 'Stripe não configurado.' });
 
     const { priceId, successUrl, cancelUrl, userEmail } = req.body;
-    if (!priceId || !successUrl) return res.status(400).json({ error: 'priceId e successUrl são necessários.' });
+    if (!priceId || !successUrl)
+      return res.status(400).json({ error: 'priceId e successUrl são necessários.' });
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -250,20 +238,23 @@ router.post('/api/create-checkout-session', async (req, res) => {
       cancel_url: cancelUrl || successUrl
     });
 
-    return res.json({ url: session.url, id: session.id });
+    return res.json({ url: session.url, id: session.id, session });
   } catch (err) {
     console.error('CREATE-CHECKOUT error:', err);
     return res.status(500).json({ error: err?.message || safeJson(err) });
   }
 });
 
-/* -------------------------
-   Webhook Stripe (raw body)
-------------------------- */
+/* ========================================================================
+   WEBHOOK Stripe
+   - importante: usa bodyParser.raw({ type: 'application/json' }) somente aqui
+   - configure no dashboard Stripe o endpoint: https://SEU-DOMINIO/webhook
+   - adicione STRIPE_WEBHOOK_SECRET nas envs do Render
+======================================================================== */
 router.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
   try {
     if (!stripe) {
-      console.warn('Webhook received but stripe not configured.');
+      console.warn('Webhook recebido mas stripe não está configurado.');
       return res.status(200).send({ received: true });
     }
 
@@ -278,29 +269,36 @@ router.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req
       return res.status(400).send(`Webhook Error: ${err?.message || 'invalid signature'}`);
     }
 
-    // tratar checkout.session.completed
+    // tratar eventos que nos interessam
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
-      const email = (session.customer_email || (session.metadata && session.metadata.email) || '').toLowerCase();
+      const email = session.customer_email || (session.metadata && session.metadata.email);
+
       if (!email) {
-        console.warn('checkout.session.completed without customer_email, ignoring.');
+        console.warn('checkout.session.completed sem customer_email, ignorando.');
         return res.status(200).send({ received: true });
       }
 
+      const clientEmail = email.toLowerCase();
+
       try {
-        // tenta achar user
+        // - checa usuário
         const { data: userRows } = await supabase
           .from('users')
           .select('id,email')
-          .eq('email', email)
+          .eq('email', clientEmail)
           .limit(1);
 
         let userId = null;
         if (!userRows || !userRows.length) {
-          // cria usuário placeholder
-          const dummy = { email, password_hash: 'stripe-created', created_at: new Date().toISOString() };
+          // cria usuário "placeholder" sem senha
+          const dummy = { email: clientEmail, password_hash: 'stripe-created', created_at: new Date().toISOString() };
           const { data: insUser, error: insErr } = await supabase.from('users').insert([dummy]).select('id').single();
-          if (!insErr && insUser) userId = insUser.id;
+          if (insErr) {
+            console.error('Erro ao criar usuário a partir do webhook:', insErr);
+          } else {
+            userId = insUser.id;
+          }
         } else {
           userId = userRows[0].id;
         }
@@ -316,28 +314,33 @@ router.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req
           purchased_at: new Date().toISOString(),
           active: true,
           status: 'used',
-          used_by: email,
-          code: licenseKey // preenche code para compatibilidade
+          used_by: clientEmail,
+          code: licenseKey
         }]);
-        if (licErr) console.error('Erro ao inserir licença no webhook:', licErr);
 
-        const { error: ulErr } = await supabase.from('user_licenses').insert([{
-          user_email: email,
-          license_key: licenseKey,
-          assigned_at: new Date().toISOString()
-        }]);
-        if (ulErr) console.error('Erro ao inserir user_licenses no webhook:', ulErr);
+        if (licErr) {
+          console.error('Erro ao inserir licença no webhook:', licErr);
+        } else {
+          // associar em user_licenses
+          const { error: ulErr } = await supabase.from('user_licenses').insert([{
+            user_email: clientEmail,
+            license_key: licenseKey,
+            assigned_at: new Date().toISOString()
+          }]);
+          if (ulErr) console.error('Erro ao inserir user_licenses no webhook:', ulErr);
+        }
 
-        // marca usuário como não-demo (opcional)
-        const { error: upUserErr } = await supabase.from('users').update({ is_demo: false }).eq('email', email);
+        // atualizar campo is_demo na tabela users (se existir)
+        const { error: upUserErr } = await supabase.from('users').update({ is_demo: false }).eq('email', clientEmail);
         if (upUserErr) console.error('Erro ao atualizar user.is_demo no webhook:', upUserErr);
 
-        console.log(`License created for ${email} via webhook, key ${licenseKey}`);
+        console.log(`Licença criada para ${clientEmail} (checkout.session.completed) - chave ${licenseKey}`);
       } catch (procErr) {
-        console.error('Error processing checkout.session.completed:', procErr);
+        console.error('Erro processando checkout.session.completed:', procErr);
       }
     }
 
+    // responder ao Stripe
     return res.json({ received: true });
   } catch (err) {
     console.error('WEBHOOK top-level error:', err);
@@ -345,9 +348,21 @@ router.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req
   }
 });
 
-/* Health */
+/* ========================================================================
+   Health-check simples
+======================================================================== */
 router.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-module.exports = router;
+/* ========================================================================
+   Export and compatibility helpers
+======================================================================== */
+// Exporta o router e a função init
+module.exports = { router, init };
+
+// Também garante compatibilidade caso o index.js exija apenas `require('./routes')`
+// e espere `init` disponível diretamente no objeto retornado ou global.
+module.exports.default = module.exports;
+global.init = init;
+console.log('routes.js loaded — exported router and init; global.init set.');
