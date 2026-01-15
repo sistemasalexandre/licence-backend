@@ -63,6 +63,17 @@ table th, table td{border-bottom:1px solid rgba(255,255,255,0.03)}
   *{transition:none!important;animation:none!important}
 }
 </style>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+
+<script>
+  const SUPABASE_URL = "https://ruwjddrpfckgwmmuaevl.supabase.co"
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ1d2pkZHJwZmNrZ3dtbXVhZXZsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg0Njc4MjcsImV4cCI6MjA4NDA0MzgyN30.abZgw1_4zscAMZG-mfsUbCA3_XFM3vorZXicn3A7Nw0"
+
+  const supabase = supabaseJs.createClient(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY
+  );
+</script>
 
 </head>
 <body>
